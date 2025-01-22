@@ -240,7 +240,7 @@ class FacWorldModel(WorldModel):
 	def adjacency_matrix(self,):
 		edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T.cpu().numpy()
 		src, dest = edge_index
-		edge_probs = np.sigmoid(self.edge_logits.data.cpu().numpy()) # [num_edges]
+		edge_probs = torch.sigmoid(self.edge_logits).data.cpu().numpy() # [num_edges]
 		adj_matrix = np.eye(self.num_nodes) * 1.0
 		for i,(s,d) in enumerate(zip(src, dest)):
 			adj_matrix[s][d] = edge_probs[i]
