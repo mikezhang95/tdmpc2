@@ -6,6 +6,9 @@ from common.scale import RunningScale
 from common.world_model import WorldModel
 from tensordict import TensorDict
 
+from common.world_model import FacWorldModel
+import wandb # TODO: move it into logger
+
 
 class TDMPC2(torch.nn.Module):
 	"""
@@ -18,7 +21,8 @@ class TDMPC2(torch.nn.Module):
 		super().__init__()
 		self.cfg = cfg
 		self.device = torch.device('cuda:0')
-		self.model = WorldModel(cfg).to(self.device)
+		# self.model = WorldModel(cfg).to(self.device)
+		self.model = FacWorldModel(cfg).to(self.device)
 		self.optim = torch.optim.Adam([
 			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
 			{'params': self.model._dynamics.parameters()},
@@ -311,9 +315,32 @@ class TDMPC2(torch.nn.Module):
 		Returns:
 			dict: Dictionary of training statistics.
 		"""
+		# M: log matrix
+		if hasattr(self.model, "adjacency_matrix"):
+			matrix = self.model.adjacency_matrix() 
+			wandb.log({f"graph_matrix": wandb.Image(matrix)})
+		 
 		obs, action, reward, task = buffer.sample()
 		kwargs = {}
 		if task is not None:
 			kwargs["task"] = task
 		torch.compiler.cudagraph_mark_step_begin()
 		return self._update(obs, action, reward, **kwargs)
+
+		# # Configure profiler
+		# prof = torch.profiler.profile(
+		# 	activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+		# 	schedule=torch.profiler.schedule(wait=1, warmup=1, active=2),
+		# 	record_shapes=True,
+		# 	with_stack=True
+		# )
+		# # Start profiling
+		# prof.start()
+		# print('perf now')
+		# for i in range(5):
+		# 	v = self._update(obs, action, reward, **kwargs)
+		# 	prof.step()
+		# # Stop profiling and export trace
+		# prof.stop()
+		# prof.export_chrome_trace("/home/yzhang/tdmpc2/tdmpc2/test_trace_" + str(prof.step_num) + ".json")
+		# return v

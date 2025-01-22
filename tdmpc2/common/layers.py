@@ -3,16 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tensordict import from_modules
 from copy import deepcopy
+from common import layers, math, init
 
 class Ensemble(nn.Module):
 	"""
 	Vectorized ensemble of modules.
 	"""
-
 	def __init__(self, modules, **kwargs):
 		super().__init__()
 		# combine_state_for_ensemble causes graph breaks
 		self.params = from_modules(*modules, as_module=True)
+		self.module = deepcopy(modules[0])
 		with self.params[0].data.to("meta").to_module(modules[0]):
 			self.module = deepcopy(modules[0])
 		self._repr = str(modules)
@@ -157,3 +158,99 @@ def enc(cfg, out={}):
 		else:
 			raise NotImplementedError(f"Encoder for observation type {k} not implemented.")
 	return nn.ModuleDict(out)
+
+
+class FullyConnectedGraph(nn.Module):
+	"""
+	FullyConnectedGraph layer with LayerNorm, activation, and optionally dropout.
+	M: currently doesn't need aggregate function in GNN, only use this structure to easily calculate node/edge features
+	"""
+	def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0., temperature=1e-2, edge_logits=None):
+		super(FullyConnectedGraph, self).__init__()
+		self.num_nodes = num_nodes
+		self.num_edges = num_nodes * (num_nodes - 1) // 2
+
+		# Define custom MLPs or other functions for node and edge updates
+		# M: can be extended to non-shared networks, then use for-loop should run fast
+		self.shared_parameters = True
+		if self.shared_parameters:
+			self.node_update = mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
+			self.edge_update = mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
+		else:
+			self.node_update = nn.ModuleList([mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_nodes)])
+			self.edge_update = nn.ModuleList([mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_edges*2)])
+
+		# Create fully connected graph edges
+		edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T
+		edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
+		self.edge_index = edge_index.to('cuda') # TODO: cpu support
+		if edge_logits is None:
+			self.edge_logits = nn.Parameter(torch.randn(self.num_edges), requires_grad=True)  
+		else:
+			self.edge_logits = edge_logits
+		self.temperature = temperature
+
+
+	def forward(self, node_features):
+
+		# Compute edge features
+		src, dest = self.edge_index
+		edge_features = torch.cat([node_features[..., src, :].clone(), node_features[..., dest, :].clone()], dim=-1)
+		if self.shared_parameters:
+			edge_features = self.edge_update(edge_features)
+			# average i->j and j->i
+			edge_outputs  = torch.mean(torch.reshape(edge_features, (*edge_features.shape[:-2], self.num_edges, 2, -1)), dim=-2) 
+		else:
+			outputs = []
+			for i in range(self.num_edges):
+				# average i->j and j->i
+				edge_average = (self.edge_update[i](edge_features[::, i, :])  + self.edge_update[i+self.num_edges](edge_features[::, i+self.num_edges, :]) ) / 2
+				outputs.append(edge_average)
+			edge_outputs = torch.stack(outputs, dim=-2)
+
+		# Update node outputs
+		if self.shared_parameters:
+			node_outputs = self.node_update(node_features)
+		else:
+			outputs = []
+			for i in range(self.num_nodes):
+				outputs.append(self.node_update[i](node_features[::, i, :]))
+			node_outputs = torch.stack(outputs, dim=-2)
+		
+		# Rescale edge representation
+		edge_outputs = self.rescale_edges(edge_outputs.transpose(-2, -1)).transpose(-2, -1)
+
+		return node_outputs, edge_outputs
+
+
+	def rescale_edges(self, edges):
+		"""
+			Args:
+				- edges: [*, num_edges]
+			Returns: 
+				- edges: [num_edges]
+		"""
+		if self.training: # keep gradients
+			# TODO: now edge weights are same across the whole batch, try sample differently
+			# edge_weights = torch.sigmoid(self.edge_logits / self.temperature)
+			edge_weights = math.relaxed_bernoulli_reparameterization(self.edge_logits, temperature=self.temperature)
+		else: # remove gradients
+			edge_weights = (torch.sigmoid(self.edge_logits.detach()) > 0.5).float()
+		return edges * edge_weights
+
+	# def _generate_bernoulli_samples(self, size):
+	# 	"""
+	# 		Returns: 
+	# 			- samples: [size, num_edges]
+	# 	"""
+	# 	num_samples = math.tuple_product(size)
+	# 	# M: due to efficiency reasons, same samples in one batch
+	# 	batch_edge_logits = self.edge_logits.expand(num_samples, -1).clone()
+	# 	# batch_edge_logits = self.edge_logits
+	# 	if self.training: # keep gradients
+	# 		samples = math.relaxed_bernoulli_reparameterization(batch_edge_logits, temperature=self.cfg.temperature).float()
+	# 	else: # remove gradients
+	# 		samples = (torch.sigmoid(batch_edge_logits.detach()) > 0.5).float()
+	# 	# samples = samples.expand(num_samples, -1).clone() # /M: clone is necessary for compile mode
+	# 	samples = torch.reshape(samples, (*size, self.num_edges))
+	# 	return samples

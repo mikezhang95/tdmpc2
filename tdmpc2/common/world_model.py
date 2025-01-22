@@ -1,10 +1,12 @@
 from copy import deepcopy
 
+import numpy as np
 import torch
 import torch.nn as nn
 
 from common import layers, math, init
 from tensordict.nn import TensorDictParams
+
 
 class WorldModel(nn.Module):
 	"""
@@ -37,14 +39,16 @@ class WorldModel(nn.Module):
 		self._detach_Qs_params = TensorDictParams(self._Qs.params.data, no_convert=True)
 		self._target_Qs_params = TensorDictParams(self._Qs.params.data.clone(), no_convert=True)
 
-		# Create modules
 		with self._detach_Qs_params.data.to("meta").to_module(self._Qs.module):
 			self._detach_Qs = deepcopy(self._Qs)
 			self._target_Qs = deepcopy(self._Qs)
+		self._detach_Qs = deepcopy(self._Qs)
+		self._target_Qs = deepcopy(self._Qs)
 
 		# Assign params to modules
 		self._detach_Qs.params = self._detach_Qs_params
 		self._target_Qs.params = self._target_Qs_params
+
 
 	def __repr__(self):
 		repr = 'TD-MPC2 World Model\n'
@@ -63,7 +67,7 @@ class WorldModel(nn.Module):
 		self.init()
 		return self
 
-	def train(self, mode=True):
+	def train(self, mode=True): 
 		"""
 		Overriding `train` method to keep target Q-networks in eval mode.
 		"""
@@ -75,7 +79,10 @@ class WorldModel(nn.Module):
 		"""
 		Soft-update target Q-networks using Polyak averaging.
 		"""
-		self._target_Qs_params.lerp_(self._detach_Qs_params, self.cfg.tau)
+		# self._target_Qs_params.lerp_(self._detach_Qs_params, self.cfg.tau)
+		# M: not update 'edge_index'
+		new_tensordict = self._detach_Qs_params.exclude("edge_index")
+		self._target_Qs_params.lerp_(new_tensordict, self.cfg.tau)
 
 	def task_emb(self, x, task):
 		"""
@@ -180,3 +187,124 @@ class WorldModel(nn.Module):
 		if return_type == "min":
 			return Q.min(0).values
 		return Q.sum(0) / 2
+
+
+class FacWorldModel(WorldModel):
+	"""
+	Factored TD-MPC2 implicit world model architecture.
+	Can be used for both single-task and multi-task experiments.
+	"""
+
+	def __init__(self, cfg):
+
+		nn.Module.__init__(self)
+
+		# TODO: multi-task not supported yet
+		# M: current seperate agents by the action
+		self.num_nodes = cfg.action_dim # number of agents
+		self.num_edges = self.num_nodes * (self.num_nodes - 1) // 2 # correlated reward graph
+		self.action_dim_node = 1
+		self.latent_dim_node = cfg.latent_dim // cfg.action_dim  # TODO: to consider not divisible 
+		cfg.latent_dim = cfg.latent_dim // cfg.action_dim * cfg.action_dim
+		cfg.mlp_dim = cfg.latent_dim 
+		cfg.simnorm_dim = 10 # for encoder
+		cfg.temperature = 1e-2
+
+		# encoder
+		self._encoder = layers.enc(cfg)
+
+		# rewrite all init functions in WorldModel
+		self.cfg = cfg
+
+		# Define factored dynamics/rewards/Q
+		self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
+		# self._dynamics = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], cfg.latent_dim, act=layers.SimNorm(cfg))
+		# self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
+		# self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
+		self._dynamics = layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], self.latent_dim_node) # , act=layers.SimNorm(cfg))
+		self._reward = layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), temperature=self.cfg.temperature)
+		self.edge_logits = self._reward.edge_logits # shared edge structure as Q network
+		self._Qs = layers.Ensemble([layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), dropout=cfg.dropout, temperature=self.cfg.temperature, edge_logits=self.edge_logits) for _ in range(cfg.num_q)])
+		# M: first defined edge logits outside r/Q network, but failed to compile
+		# self.edge_logits = nn.Parameter(torch.randn(self.num_edges), requires_grad=True)  
+
+		self.apply(init.weight_init)
+		# M: initialize certain value-related weights
+		# init.zero_([self._reward[-1].weight, self._Qs.params["2", "weight"]])
+
+		self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
+		self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
+		self.init()
+
+
+	def adjacency_matrix(self,):
+		edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T.cpu().numpy()
+		src, dest = edge_index
+		edge_probs = np.sigmoid(self.edge_logits.data.cpu().numpy()) # [num_edges]
+		adj_matrix = np.eye(self.num_nodes) * 1.0
+		for i,(s,d) in enumerate(zip(src, dest)):
+			adj_matrix[s][d] = edge_probs[i]
+			adj_matrix[d][s] = edge_probs[i]
+		return adj_matrix
+
+
+	def _generate_node_features(self, z, a):
+		latent_node = torch.reshape(z, (*z.shape[:-1], self.num_nodes, self.latent_dim_node))
+		action_node = torch.reshape(a, (*a.shape[:-1], self.num_nodes, self.action_dim_node))
+		node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_nodes, node_dim]
+		return node_features
+
+
+	def next(self, z, a, task):
+		"""
+		Predicts the next latent state given the current latent state and action.
+		Args:
+			- z: [*, hidden_dim] * might be 1 or 2 dims
+			- a: [*, action_dim] 
+		"""
+		node_features = self._generate_node_features(z, a)
+		x, _ = self._dynamics(node_features) 
+		x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim]
+		return x
+
+	def reward(self, z, a, task):
+		"""
+		Predicts instantaneous (single-step) reward.
+		"""
+		node_features = self._generate_node_features(z, a)
+		reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
+		total_reward = torch.sum(reward_nodes, dim=-2) + torch.sum(reward_edges, dim=-2) # [*, num_bins]
+		return total_reward
+
+	def Q(self, z, a, task, return_type='min', target=False, detach=False):
+		"""
+		Predict state-action value.
+		`return_type` can be one of [`min`, `avg`, `all`]:
+			- `min`: return the minimum of two randomly subsampled Q-values.
+			- `avg`: return the average of two randomly subsampled Q-values.
+			- `all`: return all Q-values.
+		`target` specifies whether to use the target Q-networks or not.
+		"""
+		assert return_type in {'min', 'avg', 'all'}
+
+		if target:
+			qnet = self._target_Qs
+		elif detach:
+			qnet = self._detach_Qs
+		else:
+			qnet = self._Qs
+
+		# M: generate qvalues
+		node_features = self._generate_node_features(z, a)
+		value_nodes, value_edges = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
+		out = torch.sum(value_nodes, dim=-2) + torch.sum(value_edges, dim=-2) # [num_q, *, num_bins]
+
+		if return_type == 'all':
+			return out
+
+		qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
+		Q = math.two_hot_inv(out[qidx], self.cfg)
+		if return_type == "min":
+			return Q.min(0).values
+		return Q.sum(0) / 2
+
