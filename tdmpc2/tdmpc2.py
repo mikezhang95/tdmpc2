@@ -8,6 +8,7 @@ from tensordict import TensorDict
 
 from common.world_model import FacWorldModel
 import wandb # TODO: move it into logger
+import numpy as np
 
 
 class TDMPC2(torch.nn.Module):
@@ -318,6 +319,7 @@ class TDMPC2(torch.nn.Module):
 		# M: log matrix
 		if hasattr(self.model, "adjacency_matrix"):
 			matrix = self.model.adjacency_matrix() 
+			matrix = (matrix * 255.0).astype(np.uint8) # normalize the pixels
 			wandb.log({f"graph_matrix": wandb.Image(matrix)})
 		 
 		obs, action, reward, task = buffer.sample()

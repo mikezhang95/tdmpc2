@@ -172,7 +172,7 @@ class FullyConnectedGraph(nn.Module):
 
 		# Define custom MLPs or other functions for node and edge updates
 		# M: can be extended to non-shared networks, then use for-loop should run fast
-		self.shared_parameters = True
+		self.shared_parameters = True 
 		if self.shared_parameters:
 			self.node_update = mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
 			self.edge_update = mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
@@ -204,7 +204,7 @@ class FullyConnectedGraph(nn.Module):
 			outputs = []
 			for i in range(self.num_edges):
 				# average i->j and j->i
-				edge_average = (self.edge_update[i](edge_features[::, i, :])  + self.edge_update[i+self.num_edges](edge_features[::, i+self.num_edges, :]) ) / 2
+				edge_average = (self.edge_update[i](edge_features[..., i, :].clone())  + self.edge_update[i+self.num_edges](edge_features[..., i+self.num_edges, :].clone()) ) / 2
 				outputs.append(edge_average)
 			edge_outputs = torch.stack(outputs, dim=-2)
 
@@ -214,7 +214,7 @@ class FullyConnectedGraph(nn.Module):
 		else:
 			outputs = []
 			for i in range(self.num_nodes):
-				outputs.append(self.node_update[i](node_features[::, i, :]))
+				outputs.append(self.node_update[i](node_features[..., i, :]))
 			node_outputs = torch.stack(outputs, dim=-2)
 		
 		# Rescale edge representation
