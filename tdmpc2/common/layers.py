@@ -187,8 +187,10 @@ class FullyConnectedGraph(nn.Module):
             for i in range(len(node_dims)-1):
                 if i == len(node_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
                 else: layer_act = nn.Mish(inplace=False)
+                if i == 0: layer_dropout = dropout
+                else: layer_dropout = 0.
                 self.node_update.append(VectorizedLinearLayer(self.num_nodes, node_dims[i], node_dims[i+1], 
-                                                              use_layer_norm=True, act=layer_act, dropout=dropout))
+                                                              use_layer_norm=True, act=layer_act, dropout=layer_dropout))
             self.node_update = nn.Sequential(*self.node_update)
 
             edge_dims = [node_in_dim*2] + mlp_dims + [node_out_dim]
@@ -196,8 +198,10 @@ class FullyConnectedGraph(nn.Module):
             for i in range(len(edge_dims)-1):
                 if i == len(edge_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
                 else: layer_act = nn.Mish(inplace=False)
+                if i == 0: layer_dropout = dropout
+                else: layer_dropout = 0.
                 self.edge_update.append(VectorizedLinearLayer(self.num_edges*2, edge_dims[i], edge_dims[i+1], 
-                                                              use_layer_norm=True, act=layer_act, dropout=dropout))
+                                                              use_layer_norm=True, act=layer_act, dropout=layer_dropout))
             self.edge_update = nn.Sequential(*self.edge_update)
 
         # Create fully connected graph edges
