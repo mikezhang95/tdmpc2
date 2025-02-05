@@ -207,8 +207,8 @@ class FacWorldModel(WorldModel):
         self.latent_dim_node = cfg.latent_dim // cfg.action_dim  # TODO: to consider not divisible 
         cfg.latent_dim = cfg.latent_dim // cfg.action_dim * cfg.action_dim
         cfg.mlp_dim = cfg.latent_dim 
-        cfg.simnorm_dim = 10 # for encoder
-        cfg.temperature = 1.0
+        cfg.simnorm_dim = 5 # to consider not divisible
+        cfg.temperature = 1.0 # larger value, more random 
 
         # encoder
         self._encoder = layers.enc(cfg)
@@ -221,7 +221,7 @@ class FacWorldModel(WorldModel):
         # self._dynamics = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], cfg.latent_dim, act=layers.SimNorm(cfg))
         # self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
         # self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
-        self._dynamics = layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], self.latent_dim_node) # , act=layers.SimNorm(cfg))
+        self._dynamics = layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], self.latent_dim_node, act=layers.SimNorm(cfg)) 
         self._reward = layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), temperature=self.cfg.temperature)
         self.edge_logits = self._reward.edge_logits # shared edge structure as Q network
         self._Qs = layers.Ensemble([layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), dropout=cfg.dropout, temperature=self.cfg.temperature, edge_logits=self.edge_logits) for _ in range(cfg.num_q)])

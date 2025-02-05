@@ -9,7 +9,43 @@ from tensordict import TensorDict
 from common.world_model import FacWorldModel
 import wandb # TODO: move it into logger
 import numpy as np
+import time
+from functools import wraps
 
+
+
+def benchmark_torch_function(func):
+    """
+    Decorator to calculate the average running time of a PyTorch function over 10 executions.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        execution_times = []
+        for _ in range(10):  # Run the function 10 times
+			 # Create CUDA events
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+
+			# Record start event
+            start_event.record()
+
+            result = func(*args, **kwargs)
+
+			 # Record end event
+            end_event.record()
+        
+            # Wait for all streams to synchronize
+            torch.cuda.synchronize()
+        
+            # Calculate elapsed time in milliseconds
+            elapsed_time_ms = start_event.elapsed_time(end_event)
+            execution_times.append(elapsed_time_ms)
+        
+        avg_time = sum(execution_times) / len(execution_times)
+        print(f"Function '{func.__name__}' took an average of {avg_time:.6f} ms over 10 runs.")
+        return result
+    
+    return wrapper
 
 class TDMPC2(torch.nn.Module):
 	"""
@@ -126,6 +162,7 @@ class TDMPC2(torch.nn.Module):
 			discount = discount * discount_update
 		return G + discount * self.model.Q(z, self.model.pi(z, task)[1], task, return_type='avg')
 
+	# @benchmark_torch_function
 	@torch.no_grad()
 	def _plan(self, obs, t0=False, eval_mode=False, task=None):
 		"""
@@ -241,6 +278,7 @@ class TDMPC2(torch.nn.Module):
 		discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
 		return reward + discount * self.model.Q(next_z, pi, task, return_type='min', target=True)
 
+	# @benchmark_torch_function
 	def _update(self, obs, action, reward, task=None):
 		# Compute targets
 		with torch.no_grad():
@@ -317,7 +355,7 @@ class TDMPC2(torch.nn.Module):
 			dict: Dictionary of training statistics.
 		"""
 		# M: log matrix
-		if hasattr(self.model, "adjacency_matrix"):
+		if wandb.run is not None and hasattr(self.model, "adjacency_matrix"):
 			matrix = self.model.adjacency_matrix() 
 			matrix = (matrix * 255.0).astype(np.uint8) # normalize the pixels
 			wandb.log({f"graph_matrix": wandb.Image(matrix)})
@@ -328,21 +366,3 @@ class TDMPC2(torch.nn.Module):
 			kwargs["task"] = task
 		torch.compiler.cudagraph_mark_step_begin()
 		return self._update(obs, action, reward, **kwargs)
-
-		# # Configure profiler
-		# prof = torch.profiler.profile(
-		# 	activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-		# 	schedule=torch.profiler.schedule(wait=1, warmup=1, active=2),
-		# 	record_shapes=True,
-		# 	with_stack=True
-		# )
-		# # Start profiling
-		# prof.start()
-		# print('perf now')
-		# for i in range(5):
-		# 	v = self._update(obs, action, reward, **kwargs)
-		# 	prof.step()
-		# # Stop profiling and export trace
-		# prof.stop()
-		# prof.export_chrome_trace("/home/yzhang/tdmpc2/tdmpc2/test_trace_" + str(prof.step_num) + ".json")
-		# return v

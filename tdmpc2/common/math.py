@@ -95,31 +95,3 @@ def gumbel_softmax_sample(p, temperature=1.0, dim=0):
 	gumbels = (logits + gumbels) / temperature  # ~Gumbel(logits,tau)
 	y_soft = gumbels.softmax(dim)
 	return y_soft.argmax(-1)
-
-
-def relaxed_bernoulli_reparameterization(logits, temperature=1.0, size=None):
-    """
-    Reparameterization trick for Bernoulli distribution using Binary Concrete.
-    Args:
-        logits (torch.Tensor): Logits of the Bernoulli distribution (log-odds of success).
-        temperature (float): Temperature parameter for relaxation.
-        size (tuple, optional): Shape of the samples. Defaults to the shape of logits.
-    Returns:
-        torch.Tensor: Relaxed Bernoulli samples.
-    """
-    if size is None:
-        size = logits.shape
-
-    # Sample from Uniform(0, 1)
-    u = torch.rand(size, device=logits.device, dtype=logits.dtype)
-
-    # Reparameterize
-    z = logits + torch.log(u) - torch.log(1 - u)
-    relaxed_sample = torch.sigmoid(z / temperature)
-    return relaxed_sample
-
-def tuple_product(t):
-    result = 1
-    for num in t:
-        result *= num
-    return result
