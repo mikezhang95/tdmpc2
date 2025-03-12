@@ -240,10 +240,11 @@ class FacWorldModel(WorldModel):
         self.init()
 
     def adjacency_matrix(self, hard=False, temperature=1.0):
-        edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T.cpu().numpy()
+        device = self.edge_logits.device
+        edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T.to(device)
         src, dest = edge_index
-        edge_probs = torch.sigmoid(self.edge_logits / temperature).data.cpu().numpy() # [num_edges] *10 make it more seperate
-        adj_matrix = np.eye(self.num_nodes) * 0.5 # for reference of medium color
+        edge_probs = torch.sigmoid(self.edge_logits / temperature) # [num_edges] *10 make it more seperate
+        adj_matrix = torch.eye(self.num_nodes).to(device) * 0.5 # for reference of medium color
         for i,(s,d) in enumerate(zip(src, dest)):
             if hard:
                adj_matrix[s][d] = 0.0 if edge_probs[i] < 0.5 else 1.0

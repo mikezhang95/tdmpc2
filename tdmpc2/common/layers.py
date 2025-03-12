@@ -263,7 +263,7 @@ class FullyConnectedGraph(nn.Module):
         if self.training: # keep gradients
             # TODO: now edge weights are same across the whole batch, try sample differently
             edge_weights = RelaxedBernoulli(logits=self.edge_logits, temperature=self.temperature).rsample()
-            # # M: STE
+            # # M: STE for less training-testing mismatch
             # soft_weights = RelaxedBernoulli(
             #     logits=self.edge_logits, 
             #     temperature=self.temperature
