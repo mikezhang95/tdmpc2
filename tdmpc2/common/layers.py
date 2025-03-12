@@ -181,7 +181,7 @@ class FullyConnectedGraph(nn.Module):
         else:
             # naive implementation
             # self.node_update = nn.ModuleList([mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_nodes)])
-            # self.edge_update = nn.ModuleList([mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_edges*2)])
+            # self.edge_update = nn.ModuleList([mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_edges)])
             node_dims = [node_in_dim] + mlp_dims + [node_out_dim]
             self.node_update = []
             for i in range(len(node_dims)-1):
@@ -200,13 +200,13 @@ class FullyConnectedGraph(nn.Module):
                 else: layer_act = nn.Mish(inplace=False)
                 if i == 0: layer_dropout = dropout
                 else: layer_dropout = 0.
-                self.edge_update.append(VectorizedLinearLayer(self.num_edges*2, edge_dims[i], edge_dims[i+1], 
+                self.edge_update.append(VectorizedLinearLayer(self.num_edges, edge_dims[i], edge_dims[i+1], 
                                                               use_layer_norm=True, act=layer_act, dropout=layer_dropout))
             self.edge_update = nn.Sequential(*self.edge_update)
 
         # Create fully connected graph edges
         edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T
-        edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
+        # edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
         # self.register_buffer('edge_index', edge_index)  # TODO: Use register_buffer to move to CUDA automatically
         self.edge_index = edge_index.to('cuda')
         if edge_logits is None:
@@ -245,7 +245,7 @@ class FullyConnectedGraph(nn.Module):
             edge_outputs = self.edge_update(edge_outputs) # [num_edges*2, B, node_dim]
             edge_outputs = edge_outputs.transpose(1, 0) # [B, num_edges*2, node_dim]
         # Average i->j and j->i
-        edge_outputs = torch.mean(edge_outputs.view(*edge_outputs.shape[:-2], self.num_edges, 2, -1), dim=-2) # [B, num_edges, input_dim]
+        # edge_outputs = torch.mean(edge_outputs.view(*edge_outputs.shape[:-2], self.num_edges, 2, -1), dim=-2) # [B, num_edges, input_dim]
         edge_outputs = self.rescale_edges(edge_outputs.transpose(-2, -1)).transpose(-2, -1)
         # Reshape outputs back to 4D/3D vectors
         edge_outputs = edge_outputs.view(*raw_input_shape[:-2], self.num_edges, -1).contiguous() # [..., num_edges, node_dim]
@@ -263,6 +263,13 @@ class FullyConnectedGraph(nn.Module):
         if self.training: # keep gradients
             # TODO: now edge weights are same across the whole batch, try sample differently
             edge_weights = RelaxedBernoulli(logits=self.edge_logits, temperature=self.temperature).rsample()
+            # # M: STE
+            # soft_weights = RelaxedBernoulli(
+            #     logits=self.edge_logits, 
+            #     temperature=self.temperature
+            # ).rsample()
+            # hard_weights = (soft_weights > 0.5).float()
+            # edge_weights = hard_weights.detach() + soft_weights - soft_weights.detach()
         else: # remove gradients
             edge_weights = (torch.sigmoid(self.edge_logits.detach()) > 0.5).float()
         return edges * edge_weights

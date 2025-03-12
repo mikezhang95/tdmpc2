@@ -210,11 +210,14 @@ class FacWorldModel(WorldModel):
         cfg.simnorm_dim = 5 # to consider not divisible
         cfg.temperature = 1.0 # larger value, more random 
 
-        # encoder
-        self._encoder = layers.enc(cfg)
-
         # rewrite all init functions in WorldModel
         self.cfg = cfg
+
+        # encoder
+        self._encoder = layers.enc(cfg) # global encoder
+        # M: independent encoder
+        # self._encoder = layers.FullyConnectedGraph(self.num_nodes, cfg.obs_shape['state'][0], max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node, act=layers.SimNorm(cfg)) 
+        # self.encode = self.ind_encode
 
         # Define factored dynamics/rewards/Q
         self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
@@ -236,7 +239,6 @@ class FacWorldModel(WorldModel):
         self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
         self.init()
 
-
     def adjacency_matrix(self, hard=False, temperature=1.0):
         edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T.cpu().numpy()
         src, dest = edge_index
@@ -253,13 +255,22 @@ class FacWorldModel(WorldModel):
                adj_matrix[d][s] = edge_probs[i]
         return adj_matrix
 
-
     def _generate_node_features(self, z, a):
         latent_node = torch.reshape(z, (*z.shape[:-1], self.num_nodes, self.latent_dim_node))
         action_node = torch.reshape(a, (*a.shape[:-1], self.num_nodes, self.action_dim_node))
         node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_nodes, node_dim]
         return node_features
 
+    def ind_encode(self, obs, task):
+        """
+        Encodes an observation into its latent representation.
+        This implementation assumes a single state-based observation.
+        """
+        # no multi-task and rgb support now
+        obs_dim = obs.shape
+        node_obs = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1) # [..., num_nodes, obs_dim]
+        node_z, _ = self._encoder(node_obs)
+        return node_z.view(*obs_dim[:-1], -1).contiguous()
 
     def next(self, z, a, task):
         """
