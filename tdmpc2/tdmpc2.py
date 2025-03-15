@@ -7,7 +7,6 @@ from common.world_model import WorldModel
 from tensordict import TensorDict
 
 from common.world_model import FacWorldModel
-import wandb # TODO: move it into logger
 import numpy as np
 import time
 from functools import wraps
@@ -22,16 +21,16 @@ def benchmark_torch_function(func):
     def wrapper(*args, **kwargs):
         execution_times = []
         for _ in range(10):  # Run the function 10 times
-                         # Create CUDA events
+            # Create CUDA events
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
 
-                        # Record start event
+            # Record start event
             start_event.record()
 
             result = func(*args, **kwargs)
 
-                         # Record end event
+            # Record end event
             end_event.record()
         
             # Wait for all streams to synchronize
@@ -61,34 +60,34 @@ class TDMPC2(torch.nn.Module):
         # self.model = WorldModel(cfg).to(self.device)
         self.model = FacWorldModel(cfg).to(self.device)
         self.optim = torch.optim.Adam([
-                {'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
-                {'params': self.model._dynamics.parameters()},
-                {'params': self.model._reward.parameters()},
-                {'params': self.model._Qs.parameters()},
-                {'params': self.model._task_emb.parameters() if self.cfg.multitask else []
-                 }
+            {'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
+            {'params': self.model._dynamics.parameters()},
+            {'params': self.model._reward.parameters()},
+            {'params': self.model._Qs.parameters()},
+            {'params': self.model._task_emb.parameters() if self.cfg.multitask else []},
+            {'params': self.model.edge_probs if hasattr(self.model, 'edge_probs') else []}
         ], lr=self.cfg.lr, capturable=True)
         self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
         self.model.eval()
         self.scale = RunningScale(cfg)
         self.cfg.iterations += 2*int(cfg.action_dim >= 20) # Heuristic for large action spaces
         self.discount = torch.tensor(
-                [self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device='cuda:0'
+            [self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device='cuda:0'
         ) if self.cfg.multitask else self._get_discount(cfg.episode_length)
         self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.num_envs, self.cfg.horizon, self.cfg.action_dim, device=self.device))
         if cfg.compile:
-                print('Compiling update function with torch.compile...')
-                self._update = torch.compile(self._update, mode="reduce-overhead")
+            print('Compiling update function with torch.compile...')
+            self._update = torch.compile(self._update, mode="reduce-overhead")
 
     @property
     def plan(self):
         _plan_val = getattr(self, "_plan_val", None)
         if _plan_val is not None:
-                return _plan_val
+            return _plan_val
         if self.cfg.compile:
-                plan = torch.compile(self._plan, mode="reduce-overhead")
+            plan = torch.compile(self._plan, mode="reduce-overhead")
         else:
-                plan = self._plan
+            plan = self._plan
         self._plan_val = plan
         return self._plan_val
 
@@ -99,10 +98,10 @@ class TDMPC2(torch.nn.Module):
         Default values should work well for most tasks, but can be changed as needed.
 
         Args:
-                episode_length (int): Length of the episode. Assumes episodes are of fixed length.
+            episode_length (int): Length of the episode. Assumes episodes are of fixed length.
 
         Returns:
-                float: Discount factor for the task.
+            float: Discount factor for the task.
         """
         frac = episode_length/self.cfg.discount_denom
         return min(max((frac-1)/(frac), self.cfg.discount_min), self.cfg.discount_max)
@@ -112,7 +111,7 @@ class TDMPC2(torch.nn.Module):
         Save state dict of the agent to filepath.
 
         Args:
-                fp (str): Filepath to save state dict to.
+            fp (str): Filepath to save state dict to.
         """
         torch.save({"model": self.model.state_dict()}, fp)
 
@@ -121,7 +120,7 @@ class TDMPC2(torch.nn.Module):
         Load a saved state dict from filepath (or dictionary) into current agent.
 
         Args:
-                fp (str or dict): Filepath or state dict to load.
+            fp (str or dict): Filepath or state dict to load.
         """
         state_dict = fp if isinstance(fp, dict) else torch.load(fp)
         self.model.load_state_dict(state_dict["model"])
@@ -132,22 +131,22 @@ class TDMPC2(torch.nn.Module):
         Select an action by planning in the latent space of the world model.
 
         Args:
-                obs (torch.Tensor): Observation from the environment.
-                t0 (bool): Whether this is the first observation in the episode.
-                eval_mode (bool): Whether to use the mean of the action distribution.
-                task (int): Task index (only used for multi-task experiments).
+            obs (torch.Tensor): Observation from the environment.
+            t0 (bool): Whether this is the first observation in the episode.
+            eval_mode (bool): Whether to use the mean of the action distribution.
+            task (int): Task index (only used for multi-task experiments).
 
         Returns:
-                torch.Tensor: Action to take in the environment.
+            torch.Tensor: Action to take in the environment.
         """
         obs = obs.to(self.device, non_blocking=True)
         if task is not None:
-                task = torch.tensor([task], device=self.device)
+            task = torch.tensor([task], device=self.device)
         if self.cfg.mpc:
-                a = self.plan(obs, t0=t0, eval_mode=eval_mode, task=task)
+            a = self.plan(obs, t0=t0, eval_mode=eval_mode, task=task)
         else:
-                z = self.model.encode(obs, task)
-                a = self.model.pi(z, task)[int(not eval_mode)][0]
+            z = self.model.encode(obs, task)
+            a = self.model.pi(z, task)[int(not eval_mode)][0]
         return a.cpu()
 
     @torch.no_grad()
@@ -155,11 +154,11 @@ class TDMPC2(torch.nn.Module):
         """Estimate value of a trajectory starting at latent state z and executing given actions."""
         G, discount = 0, 1
         for t in range(self.cfg.horizon):
-                reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task), self.cfg)
-                z = self.model.next(z, actions[:, t], task)
-                G = G + discount * reward
-                discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
-                discount = discount * discount_update
+            reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task), self.cfg)
+            z = self.model.next(z, actions[:, t], task)
+            G = G + discount * reward
+            discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
+            discount = discount * discount_update
         return G + discount * self.model.Q(z, self.model.pi(z, task)[1], task, return_type='avg')
 
     # @benchmark_torch_function
@@ -169,13 +168,13 @@ class TDMPC2(torch.nn.Module):
         Plan a sequence of actions using the learned world model.
 
         Args:
-                z (torch.Tensor): Latent state from which to plan.
-                t0 (bool): Whether this is the first observation in the episode.
-                eval_mode (bool): Whether to use the mean of the action distribution.
-                task (Torch.Tensor): Task index (only used for multi-task experiments).
-
+            task (Torch.Tensor): Task index (only used for multi-task experiments).
+z (torch.Tensor): Latent state from which to plan.
+            t0 (bool): Whether this is the first observation in the episode.
+            eval_mode (bool): Whether to use the mean of the action distribution.
+                
         Returns:
-                torch.Tensor: Action to take in the environment.
+            torch.Tensor: Action to take in the environment.
         """
         # Sample policy trajectories
         z = self.model.encode(obs, task)
@@ -225,14 +224,14 @@ class TDMPC2(torch.nn.Module):
                 mean = mean * self.model._action_masks[task]
                 std = std * self.model._action_masks[task]
 
-            # Select action
-            rand_idx = math.gumbel_softmax_sample(score.squeeze(2), dim=1)  # gumbel_softmax_sample is compatible with cuda graphs
-            actions = elite_actions[torch.arange(self.cfg.num_envs), :, rand_idx]
-            action, std = actions[:, 0], std[:, 0]
-            if not eval_mode:
-                action = action + std * torch.randn(self.cfg.action_dim, device=std.device)
-            self._prev_mean.copy_(mean)
-            return action.clamp(-1, 1)
+        # Select action
+        rand_idx = math.gumbel_softmax_sample(score.squeeze(2), dim=1)  # gumbel_softmax_sample is compatible with cuda graphs
+        actions = elite_actions[torch.arange(self.cfg.num_envs), :, rand_idx]
+        action, std = actions[:, 0], std[:, 0]
+        if not eval_mode:
+            action = action + std * torch.randn(self.cfg.action_dim, device=std.device)
+        self._prev_mean.copy_(mean)
+        return action.clamp(-1, 1)
             
             
     def update_pi(self, zs, task):
@@ -240,11 +239,11 @@ class TDMPC2(torch.nn.Module):
         Update policy using a sequence of latent states.
 
         Args:
-                zs (torch.Tensor): Sequence of latent states.
-                task (torch.Tensor): Task index (only used for multi-task experiments).
+            zs (torch.Tensor): Sequence of latent states.
+            task (torch.Tensor): Task index (only used for multi-task experiments).
 
         Returns:
-                float: Loss of the policy update.
+            float: Loss of the policy update.
         """
         _, pis, log_pis, _ = self.model.pi(zs, task)
         qs = self.model.Q(zs, pis, task, return_type='avg', detach=True)
@@ -263,20 +262,20 @@ class TDMPC2(torch.nn.Module):
 
     @torch.no_grad()
     def _td_target(self, next_z, reward, task):
-            """
-            Compute the TD-target from a reward and the observation at the following time step.
+        """
+        Compute the TD-target from a reward and the observation at the following time step.
 
-            Args:
-                    next_z (torch.Tensor): Latent state at the following time step.
-                    reward (torch.Tensor): Reward at the current time step.
-                    task (torch.Tensor): Task index (only used for multi-task experiments).
+        Args:
+            next_z (torch.Tensor): Latent state at the following time step.
+            reward (torch.Tensor): Reward at the current time step.
+            task (torch.Tensor): Task index (only used for multi-task experiments).
 
-            Returns:
-                    torch.Tensor: TD-target.
-            """
-            pi = self.model.pi(next_z, task)[1]
-            discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
-            return reward + discount * self.model.Q(next_z, pi, task, return_type='min', target=True)
+        Returns:
+            torch.Tensor: TD-target.
+        """
+        pi = self.model.pi(next_z, task)[1]
+        discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
+        return reward + discount * self.model.Q(next_z, pi, task, return_type='min', target=True)
 
     # @benchmark_torch_function
     def _update(self, obs, action, reward, task=None):

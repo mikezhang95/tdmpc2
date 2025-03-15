@@ -204,7 +204,7 @@ class FacWorldModel(WorldModel):
         self.num_nodes = cfg.action_dim # number of agents
         self.num_edges = self.num_nodes * (self.num_nodes - 1) // 2 # correlated reward graph
         self.action_dim_node = 1
-        self.latent_dim_node = cfg.latent_dim // cfg.action_dim  # TODO: to consider not divisible 
+        self.latent_dim_node = cfg.latent_dim // cfg.action_dim  
         cfg.latent_dim = cfg.latent_dim // cfg.action_dim * cfg.action_dim
         cfg.mlp_dim = cfg.latent_dim 
         cfg.simnorm_dim = 5 # to consider not divisible
@@ -225,11 +225,8 @@ class FacWorldModel(WorldModel):
         # self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
         # self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
         self._dynamics = layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], self.latent_dim_node, act=layers.SimNorm(cfg)) 
-        self._reward = layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), temperature=self.cfg.temperature)
-        self.edge_logits = self._reward.edge_logits # shared edge structure as Q network
-        self._Qs = layers.Ensemble([layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), dropout=cfg.dropout, temperature=self.cfg.temperature, edge_logits=self.edge_logits) for _ in range(cfg.num_q)])
-        # M: first defined edge logits outside r/Q network, but failed to compile
-        # self.edge_logits = nn.Parameter(torch.randn(self.num_edges), requires_grad=True)  
+        self._reward = layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1))
+        self._Qs = layers.Ensemble([layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
 
         self.apply(init.weight_init)
         # M: initialize certain value-related weights
@@ -239,11 +236,32 @@ class FacWorldModel(WorldModel):
         self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
         self.init()
 
+        # M: edges for reward/value function TODO: fail on compiled graph
+        # TODO: edge_probs/edge_logits, which is better?
+        edge_type = "auto_edges" # ["full_edges", "none_edges", "topo_edges", "auto_edges"]
+        self.temperature = 0.01
+        # initialize
+        if edge_type == "full_edges":  # fully connected graph
+            edge_probs = torch.ones((self.num_edges))
+        elif edge_type == "zero_edges": # nodes-only graph
+            edge_probs = torch.zeros((self.num_edges))
+        elif edge_type == "topo_edges": # connected by robots' topology
+            edge_probs = torch.zeros((self.num_edges))
+            for i in [0,2,5,12,14]: # special for walker robot
+                edge_probs[i] = 1.0
+        else: 
+            edge_probs = torch.rand(self.num_edges) # in [0, 1]
+        # trainable
+        if "auto" in edge_type:
+            self.edge_probs = nn.Parameter(edge_probs, requires_grad=True)  
+        else:
+            self.edge_probs = nn.Parameter(edge_probs, requires_grad=False)  
+
     def adjacency_matrix(self, hard=False, temperature=1.0):
-        device = self.edge_logits.device
+        device = self.edge_probs.device
         edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T.to(device)
         src, dest = edge_index
-        edge_probs = torch.sigmoid(self.edge_logits / temperature) # [num_edges] *10 make it more seperate
+        edge_probs = self.edge_probs.data
         adj_matrix = torch.eye(self.num_nodes).to(device) * 0.5 # for reference of medium color
         for i,(s,d) in enumerate(zip(src, dest)):
             if hard:
@@ -272,6 +290,27 @@ class FacWorldModel(WorldModel):
         node_obs = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1) # [..., num_nodes, obs_dim]
         node_z, _ = self._encoder(node_obs)
         return node_z.view(*obs_dim[:-1], -1).contiguous()
+        
+    def rescale_edges(self, edges):
+        """
+            Args:
+                - edges: [..., num_edges]
+            Returns: 
+                - edges: [..., num_edges]
+        """
+        if self.training and self.edge_probs.requires_grad : # keep gradients
+            # TODO: now edge weights are same across the whole batch, try sample differently
+            edge_weights = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(probs=self.edge_probs, temperature=self.temperature).rsample()
+            # # M: STE for less training-testing mismatch
+            # soft_weights = RelaxedBernoulli(
+            #     logits=self.edge_logits, 
+            #     temperature=self.temperature
+            # ).rsample()
+            # hard_weights = (soft_weights > 0.5).float()
+            # edge_weights = hard_weights.detach() + soft_weights - soft_weights.detach()
+        else: # remove gradients
+            edge_weights = (self.edge_probs > 0.5).float()
+        return (edges.transpose(-2, -1) * edge_weights).transpose(-2, -1)
 
     def next(self, z, a, task):
         """
@@ -291,6 +330,7 @@ class FacWorldModel(WorldModel):
         """
         node_features = self._generate_node_features(z, a)
         reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
+        reward_edges = self.rescale_edges(reward_edges)
         total_reward = torch.sum(reward_nodes, dim=-2) + torch.sum(reward_edges, dim=-2) # [*, num_bins]
         return total_reward
 
@@ -315,6 +355,7 @@ class FacWorldModel(WorldModel):
         # M: generate qvalues
         node_features = self._generate_node_features(z, a)
         value_nodes, value_edges = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
+        value_edges = self.rescale_edges(value_edges)
         out = torch.sum(value_nodes, dim=-2) + torch.sum(value_edges, dim=-2) # [num_q, *, num_bins]
 
         if return_type == 'all':

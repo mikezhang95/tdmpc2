@@ -167,7 +167,7 @@ class FullyConnectedGraph(nn.Module):
     FullyConnectedGraph layer with LayerNorm, activation, and optionally dropout.
     M: currently doesn't need aggregate function in GNN, only use this structure to easily calculate node/edge features
     """
-    def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0., temperature=1e-2, edge_logits=None):
+    def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0.):
         super(FullyConnectedGraph, self).__init__()
         self.num_nodes = num_nodes
         self.num_edges = num_nodes * (num_nodes - 1) // 2
@@ -207,13 +207,8 @@ class FullyConnectedGraph(nn.Module):
         # Create fully connected graph edges
         edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T
         # edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
-        # self.register_buffer('edge_index', edge_index)  # TODO: Use register_buffer to move to CUDA automatically
         self.edge_index = edge_index.to('cuda')
-        if edge_logits is None:
-            self.edge_logits = nn.Parameter(torch.randn(self.num_edges), requires_grad=True)  
-        else:
-            self.edge_logits = edge_logits
-        self.temperature = temperature
+        # self.register_buffer('edge_index', edge_index)  # TODO: Use register_buffer to move to CUDA automatically
 
 
     def forward(self, node_features):
@@ -246,33 +241,9 @@ class FullyConnectedGraph(nn.Module):
             edge_outputs = edge_outputs.transpose(1, 0) # [B, num_edges*2, node_dim]
         # Average i->j and j->i
         # edge_outputs = torch.mean(edge_outputs.view(*edge_outputs.shape[:-2], self.num_edges, 2, -1), dim=-2) # [B, num_edges, input_dim]
-        edge_outputs = self.rescale_edges(edge_outputs.transpose(-2, -1)).transpose(-2, -1)
         # Reshape outputs back to 4D/3D vectors
         edge_outputs = edge_outputs.view(*raw_input_shape[:-2], self.num_edges, -1).contiguous() # [..., num_edges, node_dim]
-
         return node_outputs, edge_outputs
-
-
-    def rescale_edges(self, edges):
-        """
-            Args:
-                - edges: [..., num_edges]
-            Returns: 
-                - edges: [num_edges]
-        """
-        if self.training: # keep gradients
-            # TODO: now edge weights are same across the whole batch, try sample differently
-            edge_weights = RelaxedBernoulli(logits=self.edge_logits, temperature=self.temperature).rsample()
-            # # M: STE for less training-testing mismatch
-            # soft_weights = RelaxedBernoulli(
-            #     logits=self.edge_logits, 
-            #     temperature=self.temperature
-            # ).rsample()
-            # hard_weights = (soft_weights > 0.5).float()
-            # edge_weights = hard_weights.detach() + soft_weights - soft_weights.detach()
-        else: # remove gradients
-            edge_weights = (torch.sigmoid(self.edge_logits.detach()) > 0.5).float()
-        return edges * edge_weights
 
 
 class VectorizedLinearLayer(nn.Module):
