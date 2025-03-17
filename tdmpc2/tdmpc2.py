@@ -161,6 +161,19 @@ class TDMPC2(torch.nn.Module):
             discount = discount * discount_update
         return G + discount * self.model.Q(z, self.model.pi(z, task)[1], task, return_type='avg')
 
+    @torch.no_grad()
+    def _estimate_self_value(self, z, actions, task):
+        """Estimate value of a trajectory starting at latent state z and executing given actions."""
+        G, discount = 0, 1
+        for t in range(self.cfg.horizon):
+            reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task, return_self=True), self.cfg)
+            z = self.model.next(z, actions[:, t], task)
+            G = G + discount * reward
+            discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
+            discount = discount * discount_update
+        return G + discount * self.model.Q(z, self.model.pi(z, task)[1], task, return_type='avg', return_self=True)
+
+
     # @benchmark_torch_function
     @torch.no_grad()
     def _plan(self, obs, t0=False, eval_mode=False, task=None):
@@ -197,7 +210,7 @@ z (torch.Tensor): Latent state from which to plan.
             actions[:, :, :self.cfg.num_pi_trajs] = pi_actions
     
         # Iterate MPPI
-        for _ in range(self.cfg.iterations):
+        for iter in range(self.cfg.iterations):
 
             # Sample actions
             r = torch.randn(self.cfg.num_envs, self.cfg.horizon, self.cfg.num_samples-self.cfg.num_pi_trajs, self.cfg.action_dim, device=std.device)
@@ -208,7 +221,7 @@ z (torch.Tensor): Latent state from which to plan.
                 actions = actions * self.model._action_masks[task]
 
             # Compute elite actions
-            value = self._estimate_value(z, actions, task).nan_to_num(0)
+            value = self._estimate_value(z, actions, task).nan_to_num(0) # [E, N, 1]
             elite_idxs = torch.topk(value.squeeze(2), self.cfg.num_elites, dim=1).indices
             elite_value = torch.gather(value, 1, elite_idxs.unsqueeze(2))
             elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).unsqueeze(3).expand(-1, self.cfg.horizon, -1, self.cfg.action_dim))
@@ -223,6 +236,30 @@ z (torch.Tensor): Latent state from which to plan.
             if self.cfg.multitask:
                 mean = mean * self.model._action_masks[task]
                 std = std * self.model._action_masks[task]
+
+            # M: TODO
+            # # Decentralized Version
+            # # Compute elite actions
+            # value = self._estimate_self_value(z, actions, task).nan_to_num(0).squeeze(-1) # [E, N, A]
+            # value2 = self._estimate_value(z, actions, task).nan_to_num(0).squeeze(-1) # [E, N]
+            # print(torch.sum(value, dim=-1)[0, :3], value2[0, :3])
+            # raise
+            # elite_idxs = torch.topk(value, self.cfg.num_elites, dim=1).indices # [E, EL, A]
+            # elite_value = torch.gather(value, 1, elite_idxs) # [E, EL, A]
+            # elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).expand(-1, self.cfg.horizon, -1, -1)) # [E, H, EL, A]
+
+            # # Update parameters
+            # max_value = elite_value.max(1).values # [E, A]
+            # score = torch.exp(self.cfg.temperature*(elite_value - max_value.unsqueeze(1))) # [E, EL, A]
+            # score = (score / score.sum(1, keepdim=True)) # [E, EL, A]
+            # mean = (score.unsqueeze(1) * elite_actions).sum(2) / (score.sum(1, keepdim=True) + 1e-9) # [E, H, A]
+            # std = ((score.unsqueeze(1) * (elite_actions - mean.unsqueeze(2)) ** 2).sum(2) / (score.sum(1, keepdim=True) + 1e-9)).sqrt() # [E, H, A]
+            # std = std.clamp(self.cfg.min_std, self.cfg.max_std)
+
+        # # Select action
+        # rand_idx = torch.stack([math.gumbel_softmax_sample(score[..., i], dim=1) for i in range(self.cfg.action_dim)], dim=-1) # gumbel_softmax_sample is compatible with cuda graphs
+        # actions = torch.gather(elite_actions, 2, rand_idx.unsqueeze(1).unsqueeze(1).expand(-1, self.cfg.horizon, -1, -1)).squeeze(2) # [E, H, A]
+        # action, std = actions[:, 0], std[:, 0]
 
         # Select action
         rand_idx = math.gumbel_softmax_sample(score.squeeze(2), dim=1)  # gumbel_softmax_sample is compatible with cuda graphs
