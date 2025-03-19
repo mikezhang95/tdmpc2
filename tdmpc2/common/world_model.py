@@ -237,31 +237,42 @@ class FacWorldModel(WorldModel):
         self.init()
 
         # M: edges for reward/value function TODO: fail on compiled graph
-        # TODO: edge_probs/edge_logits, which is better?
-        edge_type = "auto_edges" # ["full_edges", "none_edges", "topo_edges", "auto_edges"]
-        self.temperature = 0.01
+        self.temperature = cfg.graph_temperature
         # initialize
-        if edge_type == "full_edges":  # fully connected graph
-            edge_probs = torch.ones((self.num_edges))
-        elif edge_type == "zero_edges": # nodes-only graph
-            edge_probs = torch.zeros((self.num_edges))
-        elif edge_type == "topo_edges": # connected by robots' topology
-            edge_probs = torch.zeros((self.num_edges))
+        if cfg.edge_type == "full_edges":  # fully connected graph
+            edge_logits = torch.ones((self.num_edges)) * 1e9
+        elif cfg.edge_type == "zero_edges": # nodes-only graph
+            edge_logits = torch.ones((self.num_edges)) * (-1e9)
+        elif cfg.edge_type == "topo_edges": # connected by robots' topology
+            edge_logits = torch.ones((self.num_edges)) * (-1e9)
             for i in [0,2,5,12,14]: # special for walker robot
-                edge_probs[i] = 1.0
+                edge_logits[i] = 1e9
         else: 
-            edge_probs = torch.rand(self.num_edges) # in [0, 1]
+            edge_logits = torch.randn(self.num_edges) 
         # trainable
-        if "auto" in edge_type:
-            self.edge_probs = nn.Parameter(edge_probs, requires_grad=True)  
-        else:
-            self.edge_probs = nn.Parameter(edge_probs, requires_grad=False)  
+        self.edge_logits = nn.Parameter(edge_logits, requires_grad=False)  
+        if "auto" in cfg.edge_type:
+            self.edge_logits.requires_grad = True
+        print(f"[INFO] edge_logits initial values: {self.edge_logits.data} trainable: {self.edge_logits.requires_grad}")
+
+        # M: create index for fully-connected graph
+        self.edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T
+        # edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
+        def calc_reverse_edge_index():
+            nodes = torch.arange(self.num_nodes)
+            src_mask = self.edge_index[0].unsqueeze(0) == nodes.unsqueeze(1)  # 
+            tgt_mask = self.edge_index[1].unsqueeze(0) == nodes.unsqueeze(1)  # 
+            mask = src_mask | tgt_mask  # 
+            nonzero_indices = mask.nonzero()  # 
+            reverse_edge_index = torch.split(nonzero_indices[:, 1], mask.sum(dim=1).tolist())
+            return reverse_edge_index
+        self.reverse_edge_index = calc_reverse_edge_index()
+
 
     def adjacency_matrix(self, hard=False, temperature=1.0):
-        device = self.edge_probs.device
-        edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T.to(device)
-        src, dest = edge_index
-        edge_probs = self.edge_probs.data
+        device = self.edge_logits.device
+        src, dest = self.edge_index.to(device)
+        edge_probs = torch.sigmoid(self.edge_logits.data)
         adj_matrix = torch.eye(self.num_nodes).to(device) * 0.5 # for reference of medium color
         for i,(s,d) in enumerate(zip(src, dest)):
             if hard:
@@ -298,9 +309,9 @@ class FacWorldModel(WorldModel):
             Returns: 
                 - edges: [..., num_edges]
         """
-        if self.training and self.edge_probs.requires_grad : # keep gradients
+        if self.training and self.edge_logits.requires_grad : # keep gradients
             # TODO: now edge weights are same across the whole batch, try sample differently
-            edge_weights = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(probs=self.edge_probs, temperature=self.temperature).rsample()
+            edge_weights = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(logits=self.edge_logits, temperature=self.temperature).rsample()
             # # M: STE for less training-testing mismatch
             # soft_weights = RelaxedBernoulli(
             #     logits=self.edge_logits, 
@@ -309,8 +320,8 @@ class FacWorldModel(WorldModel):
             # hard_weights = (soft_weights > 0.5).float()
             # edge_weights = hard_weights.detach() + soft_weights - soft_weights.detach()
         else: # remove gradients
-            edge_weights = (self.edge_probs > 0.5).float()
-        return (edges.transpose(-2, -1) * edge_weights).transpose(-2, -1)
+            edge_weights = (self.edge_logits > 0.0).float()
+        return (edges.transpose(-2, -1) * edge_weights).transpose(-2, -1), edge_weights
 
     def next(self, z, a, task):
         """
@@ -324,17 +335,26 @@ class FacWorldModel(WorldModel):
         x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim]
         return x
 
-    def reward(self, z, a, task):
+
+    def reward(self, z, a, task, return_self=False):
         """
         Predicts instantaneous (single-step) reward.
         """
         node_features = self._generate_node_features(z, a)
         reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
-        reward_edges = self.rescale_edges(reward_edges)
-        total_reward = torch.sum(reward_nodes, dim=-2) + torch.sum(reward_edges, dim=-2) # [*, num_bins]
-        return total_reward
+        reward_nodes = torch.softmax(reward_nodes, dim=-1) # probs
+        reward_edges = torch.softmax(reward_edges, dim=-1) # probs
+        reward_edges, edge_weights = self.rescale_edges(reward_edges) # weighted probs
+        if not return_self:
+            # total_reward = torch.sum(reward_nodes, dim=-2) + torch.sum(reward_edges, dim=-2) # [*, num_bins]
+            total_reward = ( torch.sum(reward_nodes, dim=-2) + 2 * torch.sum(reward_edges, dim=-2) ) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] # logits
+            return torch.log(total_reward)
+        else:
+            self_reward = torch.stack([ (reward_nodes[..., n, :] + torch.sum(reward_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+            return torch.log(self_reward)
 
-    def Q(self, z, a, task, return_type='min', target=False, detach=False):
+
+    def Q(self, z, a, task, return_type='min', target=False, detach=False, return_self=False):
         """
         Predict state-action value.
         `return_type` can be one of [`min`, `avg`, `all`]:
@@ -355,14 +375,23 @@ class FacWorldModel(WorldModel):
         # M: generate qvalues
         node_features = self._generate_node_features(z, a)
         value_nodes, value_edges = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
-        value_edges = self.rescale_edges(value_edges)
-        out = torch.sum(value_nodes, dim=-2) + torch.sum(value_edges, dim=-2) # [num_q, *, num_bins]
+        value_nodes = torch.softmax(value_nodes, dim=-1) # probs
+        value_edges, edge_weights = self.rescale_edges(torch.softmax(value_edges, dim=-1)) # probs
+        if not return_self:
+            # out = torch.sum(value_nodes, dim=-2) + torch.sum(value_edges, dim=-2) # [num_q, *, num_bins]
+            out = ( torch.sum(value_nodes, dim=-2) + 2 * torch.sum(value_edges, dim=-2) ) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] # logits
+        else:
+            out = torch.stack([ (value_nodes[..., n, :] + torch.sum(value_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
 
         if return_type == 'all':
             return out
 
         qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
-        Q = math.two_hot_inv(out[qidx], self.cfg)
+
+        if return_self:
+            Q = torch.stack([math.two_hot_inv(out[qidx][..., i, :], self.cfg) for i in range(self.cfg.action_dim)], dim=-2)
+        else:
+            Q = math.two_hot_inv(out[qidx], self.cfg)
         if return_type == "min":
             return Q.min(0).values
         return Q.sum(0) / 2

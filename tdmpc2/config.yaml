@@ -12,7 +12,7 @@ eval_episodes: 10
 eval_freq: 50000
 
 # training
-steps: 10_000_000
+steps: 10_000_00
 batch_size: 256
 steps_per_update: 1
 reward_coef: 0.1
@@ -67,11 +67,11 @@ simnorm_dim: 8
 wandb_project: ???
 wandb_entity: ???
 wandb_silent: false
-enable_wandb: true
+enable_wandb: false
 save_csv: true
 
 # misc
-save_video: true
+save_video: false
 save_agent: true
 seed: 1
 
@@ -91,3 +91,9 @@ bin_size: ???
 
 # speedups
 compile: False
+
+# fac models
+fac_model: True
+fac_plan: False
+edge_type: zero_edges
+graph_temperature: 1.0
