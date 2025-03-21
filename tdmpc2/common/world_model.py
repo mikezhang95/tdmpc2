@@ -342,16 +342,12 @@ class FacWorldModel(WorldModel):
         """
         node_features = self._generate_node_features(z, a)
         reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
-        reward_nodes = torch.softmax(reward_nodes, dim=-1) # probs
-        reward_edges = torch.softmax(reward_edges, dim=-1) # probs
-        reward_edges, edge_weights = self.rescale_edges(reward_edges) # weighted probs
+        reward_edges, edge_weights = self.rescale_edges(reward_edges) # weighted logits 
         if not return_self:
-            # total_reward = torch.sum(reward_nodes, dim=-2) + torch.sum(reward_edges, dim=-2) # [*, num_bins]
-            total_reward = ( torch.sum(reward_nodes, dim=-2) + 2 * torch.sum(reward_edges, dim=-2) ) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] # logits
-            return torch.log(total_reward)
+            total_reward = (torch.sum(reward_nodes, dim=-2) + 2*torch.sum(reward_edges, dim=-2)) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] 
         else:
-            self_reward = torch.stack([ (reward_nodes[..., n, :] + torch.sum(reward_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
-            return torch.log(self_reward)
+            total_reward = torch.stack([(reward_nodes[..., n, :] + torch.sum(reward_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+        return total_reward
 
 
     def Q(self, z, a, task, return_type='min', target=False, detach=False, return_self=False):
@@ -375,13 +371,11 @@ class FacWorldModel(WorldModel):
         # M: generate qvalues
         node_features = self._generate_node_features(z, a)
         value_nodes, value_edges = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
-        value_nodes = torch.softmax(value_nodes, dim=-1) # probs
-        value_edges, edge_weights = self.rescale_edges(torch.softmax(value_edges, dim=-1)) # probs
+        value_edges, edge_weights = self.rescale_edges(value_edges) 
         if not return_self:
-            # out = torch.sum(value_nodes, dim=-2) + torch.sum(value_edges, dim=-2) # [num_q, *, num_bins]
-            out = ( torch.sum(value_nodes, dim=-2) + 2 * torch.sum(value_edges, dim=-2) ) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] # logits
+            out = (torch.sum(value_nodes, dim=-2) + 2 * torch.sum(value_edges, dim=-2)) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] 
         else:
-            out = torch.stack([ (value_nodes[..., n, :] + torch.sum(value_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+            out = torch.stack([(value_nodes[..., n, :] + torch.sum(value_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
 
         if return_type == 'all':
             return out
