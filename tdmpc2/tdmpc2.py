@@ -152,30 +152,16 @@ class TDMPC2(torch.nn.Module):
         return a.cpu()
 
     @torch.no_grad()
-    def _estimate_value(self, z, actions, task):
+    def _estimate_value(self, z, actions, task, output_agents=False):
         """Estimate value of a trajectory starting at latent state z and executing given actions."""
         G, discount = 0, 1
         for t in range(self.cfg.horizon):
-            reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task), self.cfg)
+            reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task, output_agents=output_agents), self.cfg)
             z = self.model.next(z, actions[:, t], task)
             G = G + discount * reward
             discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
             discount = discount * discount_update
-        return G + discount * self.model.Q(z, self.model.pi(z, task)[1], task, return_type='avg')
-
-    @torch.no_grad()
-    def _estimate_self_value(self, z, actions, task):
-        """Estimate value of a trajectory starting at latent state z and executing given actions."""
-        G, discount = 0, 1
-        for t in range(self.cfg.horizon):
-            reward_logits = self.model.reward(z, actions[:, t], task, return_self=True) # [E, N, A, num_bins] 
-            reward = torch.stack([math.two_hot_inv(reward_logits[..., i, :], self.cfg) for i in range(self.cfg.action_dim)], dim=-2) # [E, N, A]
-            z = self.model.next(z, actions[:, t], task)
-            G = G + discount * reward
-            discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
-            discount = discount * discount_update
-        return G + discount * self.model.Q(z, self.model.pi(z, task)[1], task, return_type='avg', return_self=True)
-
+        return G + discount * self.model.Q(z, self.model.pi(z, task)[1], task, return_type='avg', output_agents=output_agents)
 
     # @benchmark_torch_function
     @torch.no_grad()
@@ -225,7 +211,7 @@ z (torch.Tensor): Latent state from which to plan.
 
             # Compute elite actions
             if self.cfg.fac_plan and self.cfg.fac_model: # decentralized version
-                value = self._estimate_self_value(z, actions, task).nan_to_num(0).squeeze(-1) # [E, N, A]
+                value = self._estimate_value(z, actions, task, output_agents=True).nan_to_num(0).squeeze(-1) # [E, N, A]
                 elite_idxs = torch.topk(value, self.cfg.num_elites, dim=1).indices # [E, EL, A]
                 elite_value = torch.gather(value, 1, elite_idxs) # [E, EL, A]
                 elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).expand(-1, self.cfg.horizon, -1, -1)) # [E, H, EL, A]

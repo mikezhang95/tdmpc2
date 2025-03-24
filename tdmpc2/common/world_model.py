@@ -255,18 +255,23 @@ class FacWorldModel(WorldModel):
             self.edge_logits.requires_grad = True
         print(f"[INFO] edge_logits initial values: {self.edge_logits.data} trainable: {self.edge_logits.requires_grad}")
 
+        # TODO: put them all in cuda devices with register method!
         # M: create index for fully-connected graph
         self.edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T
         # edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
         def calc_reverse_edge_index():
             nodes = torch.arange(self.num_nodes)
-            src_mask = self.edge_index[0].unsqueeze(0) == nodes.unsqueeze(1)  # 
+            src_mask = self.edge_index[0].unsqueeze(0) == nodes.unsqueeze(1)  #
             tgt_mask = self.edge_index[1].unsqueeze(0) == nodes.unsqueeze(1)  # 
             mask = src_mask | tgt_mask  # 
             nonzero_indices = mask.nonzero()  # 
             reverse_edge_index = torch.split(nonzero_indices[:, 1], mask.sum(dim=1).tolist())
-            return reverse_edge_index
-        self.reverse_edge_index = calc_reverse_edge_index()
+            self.edges_all = torch.cat(reverse_edge_index).to('cuda')  # 总边数: total_edges
+            self.node_indices = torch.cat([
+                torch.full_like(e, n, dtype=torch.long) 
+                for n, e in enumerate(reverse_edge_index)
+            ]).to('cuda')  # 形状: [total_edges]
+        calc_reverse_edge_index()
 
 
     def adjacency_matrix(self, hard=False, temperature=1.0):
@@ -336,21 +341,40 @@ class FacWorldModel(WorldModel):
         return x
 
 
-    def reward(self, z, a, task, return_self=False):
+    def reward(self, z, a, task, output_agents=False):
         """
         Predicts instantaneous (single-step) reward.
         """
         node_features = self._generate_node_features(z, a)
         reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
         reward_edges, edge_weights = self.rescale_edges(reward_edges) # weighted logits 
-        if not return_self:
-            total_reward = (torch.sum(reward_nodes, dim=-2) + 2*torch.sum(reward_edges, dim=-2)) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] 
+        if not output_agents:
+            # M: divide num_nodes/num_edges for all logits
+            total_reward = (torch.sum(reward_nodes, dim=-2) + 2 * torch.sum(reward_edges, dim=-2)) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins]
         else:
-            total_reward = torch.stack([(reward_nodes[..., n, :] + torch.sum(reward_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+            # total_reward = torch.stack([(reward_nodes[..., n, :] + torch.sum(reward_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+            sum_edges = torch.zeros_like(reward_nodes)
+            sum_edges.index_add_(
+                dim=-2,  
+                index=self.node_indices, 
+                source=reward_edges[..., self.edges_all, :]  
+            )
+            sum_weights = torch.zeros(
+                reward_nodes.size(-2),  # V
+                device=reward_nodes.device
+            )
+            sum_weights.index_add_(
+                dim=0, 
+                index=self.node_indices, 
+                source=edge_weights[self.edges_all]  
+            )
+            denominator = (1 + sum_weights).unsqueeze(-1).unsqueeze(0)  
+
+            total_reward = (reward_nodes + sum_edges) / denominator
         return total_reward
 
 
-    def Q(self, z, a, task, return_type='min', target=False, detach=False, return_self=False):
+    def Q(self, z, a, task, return_type='min', target=False, detach=False, output_agents=False):
         """
         Predict state-action value.
         `return_type` can be one of [`min`, `avg`, `all`]:
@@ -372,20 +396,34 @@ class FacWorldModel(WorldModel):
         node_features = self._generate_node_features(z, a)
         value_nodes, value_edges = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
         value_edges, edge_weights = self.rescale_edges(value_edges) 
-        if not return_self:
+        if not output_agents:
             out = (torch.sum(value_nodes, dim=-2) + 2 * torch.sum(value_edges, dim=-2)) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] 
         else:
-            out = torch.stack([(value_nodes[..., n, :] + torch.sum(value_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+            # out = torch.stack([(value_nodes[..., n, :] + torch.sum(value_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+            sum_edges = torch.zeros_like(value_nodes)
+            sum_edges.index_add_(
+                dim=-2,  
+                index=self.node_indices, 
+                source=value_edges[..., self.edges_all, :]  
+            )
+            sum_weights = torch.zeros(
+                value_nodes.size(-2),  
+                device=value_nodes.device
+            )
+            sum_weights.index_add_(
+                dim=0, 
+                index=self.node_indices, 
+                source=edge_weights[self.edges_all]  
+            )
+            denominator = (1 + sum_weights).unsqueeze(-1).unsqueeze(0)  
+
+            out = (value_nodes + sum_edges) / denominator
 
         if return_type == 'all':
             return out
 
         qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
-
-        if return_self:
-            Q = torch.stack([math.two_hot_inv(out[qidx][..., i, :], self.cfg) for i in range(self.cfg.action_dim)], dim=-2)
-        else:
-            Q = math.two_hot_inv(out[qidx], self.cfg)
+        Q = math.two_hot_inv(out[qidx], self.cfg)
         if return_type == "min":
             return Q.min(0).values
         return Q.sum(0) / 2
