@@ -198,29 +198,31 @@ class FacWorldModel(WorldModel):
     def __init__(self, cfg):
 
         nn.Module.__init__(self)
-
         # TODO: multi-task not supported yet
+        # TODO: fail to compiled graph when requires_grad = True
+        # TODO: edge weights are sampled the same across the whole batch, try sample differently
+
         # M: current seperate agents by the action
         self.num_nodes = cfg.action_dim # number of agents
-        self.num_edges = self.num_nodes * (self.num_nodes - 1) // 2 # correlated reward graph
+        self.num_edges = self.num_nodes * (self.num_nodes - 1) // 2 # fully_connected reward/value graph
         self.action_dim_node = 1
-        self.latent_dim_node = cfg.latent_dim // cfg.action_dim  
-        cfg.latent_dim = cfg.latent_dim // cfg.action_dim * cfg.action_dim
+        self.latent_dim_node = cfg.latent_dim // (cfg.action_dim * cfg.simnorm_dim) * cfg.simnorm_dim
+        cfg.latent_dim = self.latent_dim_node * cfg.action_dim
         cfg.mlp_dim = cfg.latent_dim 
-        cfg.simnorm_dim = 5 # to consider not divisible
-        cfg.temperature = 1.0 # larger value, more random 
 
         # rewrite all init functions in WorldModel
         self.cfg = cfg
 
+        # rollut policy: central actor
+        self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
+
         # encoder
-        self._encoder = layers.enc(cfg) # global encoder
-        # M: independent encoder
+        self._encoder = layers.enc(cfg) # central encoder
+        # M: distributed encoder
         # self._encoder = layers.FullyConnectedGraph(self.num_nodes, cfg.obs_shape['state'][0], max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node, act=layers.SimNorm(cfg)) 
         # self.encode = self.ind_encode
 
         # Define factored dynamics/rewards/Q
-        self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
         # self._dynamics = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], cfg.latent_dim, act=layers.SimNorm(cfg))
         # self._reward = layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
         # self._Qs = layers.Ensemble([layers.mlp(cfg.latent_dim + cfg.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
@@ -229,14 +231,12 @@ class FacWorldModel(WorldModel):
         self._Qs = layers.Ensemble([layers.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
 
         self.apply(init.weight_init)
-        # M: initialize certain value-related weights
-        # init.zero_([self._reward[-1].weight, self._Qs.params["2", "weight"]])
+        init.zero_([self._reward.node_update[-1].weight, self._reward.edge_update[-1].weight, self._Qs.params["node_update", "2", "weight"], self._Qs.params["edge_update", "2", "weight"]])
 
         self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
         self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
-        self.init()
 
-        # M: edges for reward/value function TODO: fail on compiled graph
+        # M: === edges for reward/value function ===
         self.temperature = cfg.graph_temperature
         # initialize
         if cfg.edge_type == "full_edges":  # fully connected graph
@@ -255,28 +255,32 @@ class FacWorldModel(WorldModel):
             self.edge_logits.requires_grad = True
         print(f"[INFO] edge_logits initial values: {self.edge_logits.data} trainable: {self.edge_logits.requires_grad}")
 
-        # TODO: put them all in cuda devices with register method!
         # M: create index for fully-connected graph
-        self.edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T
-        # edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
-        def calc_reverse_edge_index():
-            nodes = torch.arange(self.num_nodes)
-            src_mask = self.edge_index[0].unsqueeze(0) == nodes.unsqueeze(1)  #
-            tgt_mask = self.edge_index[1].unsqueeze(0) == nodes.unsqueeze(1)  # 
-            mask = src_mask | tgt_mask  # 
-            nonzero_indices = mask.nonzero()  # 
-            reverse_edge_index = torch.split(nonzero_indices[:, 1], mask.sum(dim=1).tolist())
-            self.edges_all = torch.cat(reverse_edge_index).to('cuda')  # 总边数: total_edges
-            self.node_indices = torch.cat([
+        edges_index = torch.combinations(torch.arange(self.num_nodes), r=2).T # [2, num_edges], for 3 agents, [[0,0,1],[1,2,2]]
+        # edges_index = torch.cat([edges_index, edges_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
+        nodes = torch.arange(self.num_nodes)
+        src_mask = edges_index[0].unsqueeze(0) == nodes.unsqueeze(1)  
+        tgt_mask = edges_index[1].unsqueeze(0) == nodes.unsqueeze(1)  
+        mask = src_mask | tgt_mask  
+        nonzero_indices = mask.nonzero()  
+        reverse_edges_index = torch.split(nonzero_indices[:, 1], mask.sum(dim=1).tolist()) # List, for 3 agents, [[0,1], [0,2], [1,2]]
+        edges_all = torch.cat(reverse_edges_index) # [2*num_edges]
+        node_indices = torch.cat([
                 torch.full_like(e, n, dtype=torch.long) 
-                for n, e in enumerate(reverse_edge_index)
-            ]).to('cuda')  # 形状: [total_edges]
-        calc_reverse_edge_index()
+                for n, e in enumerate(reverse_edges_index)
+        ])
+        self.register_buffer("edges_index", edges_index)
+        self.register_buffer("edges_all", edges_all)
+        self.register_buffer("node_indices", node_indices)
+        # ================================================
+
+        # init all params
+        self.init()
 
 
     def adjacency_matrix(self, hard=False, temperature=1.0):
         device = self.edge_logits.device
-        src, dest = self.edge_index.to(device)
+        src, dest = self.edges_index
         edge_probs = torch.sigmoid(self.edge_logits.data)
         adj_matrix = torch.eye(self.num_nodes).to(device) * 0.5 # for reference of medium color
         for i,(s,d) in enumerate(zip(src, dest)):
@@ -290,23 +294,14 @@ class FacWorldModel(WorldModel):
                adj_matrix[d][s] = edge_probs[i]
         return adj_matrix
 
+
     def _generate_node_features(self, z, a):
         latent_node = torch.reshape(z, (*z.shape[:-1], self.num_nodes, self.latent_dim_node))
         action_node = torch.reshape(a, (*a.shape[:-1], self.num_nodes, self.action_dim_node))
         node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_nodes, node_dim]
         return node_features
 
-    def ind_encode(self, obs, task):
-        """
-        Encodes an observation into its latent representation.
-        This implementation assumes a single state-based observation.
-        """
-        # no multi-task and rgb support now
-        obs_dim = obs.shape
-        node_obs = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1) # [..., num_nodes, obs_dim]
-        node_z, _ = self._encoder(node_obs)
-        return node_z.view(*obs_dim[:-1], -1).contiguous()
-        
+       
     def rescale_edges(self, edges):
         """
             Args:
@@ -315,9 +310,8 @@ class FacWorldModel(WorldModel):
                 - edges: [..., num_edges]
         """
         if self.training and self.edge_logits.requires_grad : # keep gradients
-            # TODO: now edge weights are same across the whole batch, try sample differently
             edge_weights = torch.distributions.relaxed_bernoulli.RelaxedBernoulli(logits=self.edge_logits, temperature=self.temperature).rsample()
-            # # M: STE for less training-testing mismatch
+            # # M: STE for less training-testing mismatch (hard samples)
             # soft_weights = RelaxedBernoulli(
             #     logits=self.edge_logits, 
             #     temperature=self.temperature
@@ -349,10 +343,10 @@ class FacWorldModel(WorldModel):
         reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
         reward_edges, edge_weights = self.rescale_edges(reward_edges) # weighted logits 
         if not output_agents:
-            # M: divide num_nodes/num_edges for all logits
+            # M: divide num_nodes/num_edges for all logits to normalize outputs
             total_reward = (torch.sum(reward_nodes, dim=-2) + 2 * torch.sum(reward_edges, dim=-2)) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins]
         else:
-            # total_reward = torch.stack([(reward_nodes[..., n, :] + torch.sum(reward_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+            # total_reward = torch.stack([(reward_nodes[..., n, :] + torch.sum(reward_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins], slow version
             sum_edges = torch.zeros_like(reward_nodes)
             sum_edges.index_add_(
                 dim=-2,  
@@ -369,7 +363,6 @@ class FacWorldModel(WorldModel):
                 source=edge_weights[self.edges_all]  
             )
             denominator = (1 + sum_weights).unsqueeze(-1).unsqueeze(0)  
-
             total_reward = (reward_nodes + sum_edges) / denominator
         return total_reward
 
@@ -399,7 +392,7 @@ class FacWorldModel(WorldModel):
         if not output_agents:
             out = (torch.sum(value_nodes, dim=-2) + 2 * torch.sum(value_edges, dim=-2)) / (self.num_nodes + 2 * torch.sum(edge_weights)) # [*, num_bins] 
         else:
-            # out = torch.stack([(value_nodes[..., n, :] + torch.sum(value_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins]
+            # out = torch.stack([(value_nodes[..., n, :] + torch.sum(value_edges[..., e, :], dim=-2)) / (1 + torch.sum(edge_weights[e])) for n, e in enumerate(self.reverse_edge_index)], dim=-2) # [*, num_nodes, num_bins], slow version
             sum_edges = torch.zeros_like(value_nodes)
             sum_edges.index_add_(
                 dim=-2,  
@@ -416,7 +409,6 @@ class FacWorldModel(WorldModel):
                 source=edge_weights[self.edges_all]  
             )
             denominator = (1 + sum_weights).unsqueeze(-1).unsqueeze(0)  
-
             out = (value_nodes + sum_edges) / denominator
 
         if return_type == 'all':
@@ -428,3 +420,14 @@ class FacWorldModel(WorldModel):
             return Q.min(0).values
         return Q.sum(0) / 2
 
+    # def ind_encode(self, obs, task):
+    #     """
+    #     Encodes an observation into its latent representation.
+    #     This implementation assumes a single state-based observation.
+    #     """
+    #     # no multi-task and rgb support now
+    #     obs_dim = obs.shape
+    #     node_obs = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1) # [..., num_nodes, obs_dim]
+    #     node_z, _ = self._encoder(node_obs)
+    #     return node_z.view(*obs_dim[:-1], -1).contiguous()
+ 
