@@ -119,7 +119,7 @@ class WorldModel(nn.Module):
         z = torch.cat([z, a], dim=-1)
         return self._dynamics(z)
 
-    def reward(self, z, a, task):
+    def reward(self, z, a, task, output_agents=False):
         """
         Predicts instantaneous (single-step) reward.
         """
@@ -156,7 +156,7 @@ class WorldModel(nn.Module):
 
         return mu, pi, log_pi, log_std
 
-    def Q(self, z, a, task, return_type='min', target=False, detach=False):
+    def Q(self, z, a, task, return_type='min', target=False, detach=False, output_agents=False):
         """
         Predict state-action value.
         `return_type` can be one of [`min`, `avg`, `all`]:
