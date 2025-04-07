@@ -431,3 +431,80 @@ class FacWorldModel(WorldModel):
     #     node_z, _ = self._encoder(node_obs)
     #     return node_z.view(*obs_dim[:-1], -1).contiguous()
  
+from common import tdmpc_utils
+class TOLD(WorldModel):
+    """
+    Factored TD-MPC2 implicit world model architecture.
+    Can be used for both single-task and multi-task experiments.
+    """
+
+    def __init__(self, cfg):
+
+        nn.Module.__init__(self)
+        self.cfg = cfg
+
+        self._encoder = tdmpc_utils.enc(cfg)
+        self._dynamics = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, cfg.latent_dim)
+        self._reward = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, 1)
+        self._pi = tdmpc_utils.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.action_dim)
+        self._Qs = layers.Ensemble([tdmpc_utils.q(cfg) for _ in range(cfg.num_q)])
+
+        self.apply(tdmpc_utils.orthogonal_init)
+        init.zero_([self._reward[-1].weight, self._Qs.params["5", "weight"]])
+        init.zero_([self._reward[-1].bias, self._Qs.params["5", "bias"]])
+
+        self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
+        self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
+        self.init()
+
+    def encode(self, obs, task):
+        return self._encoder(obs)
+
+
+    def pi(self, z, task):
+        """
+        Samples an action from the policy prior.
+        The policy prior is a Gaussian distribution with
+        mean and (log) std predicted by a neural network.
+        """
+        if self.cfg.multitask:
+            z = self.task_emb(z, task)
+
+        # Gaussian policy prior
+        mu, log_std = self._pi(z).chunk(2, dim=-1)
+        log_std = math.log_std(log_std, self.log_std_min, self.log_std_dif)
+        eps = torch.randn_like(mu)
+
+        if self.cfg.multitask: # Mask out unused action dimensions
+            mu = mu * self._action_masks[task]
+            log_std = log_std * self._action_masks[task]
+            eps = eps * self._action_masks[task]
+            action_dims = self._action_masks.sum(-1)[task].unsqueeze(-1)
+        else: # No masking
+            action_dims = None
+
+        log_pi = math.gaussian_logprob(eps, log_std, size=action_dims)
+        pi = mu + eps * log_std.exp()
+        mu, pi, log_pi = math.squash(mu, pi, log_pi)
+
+        return mu, pi, log_pi, log_std
+    
+    def pi(self, z, task):
+        """Samples an action from the learned policy (pi)."""
+        mu = self._pi(z)
+        # log_std = torch.log(torch.ones_like(mu) * self.cfg.min_std)
+        # log_std = math.log_std(log_std, self.log_std_min, self.log_std_dif)
+        # eps = torch.randn_like(mu)
+        
+        # log_pi = math.gaussian_logprob(eps, log_std, size=None)
+        # pi = mu + eps * log_std.exp()
+        # mu, pi, log_pi = math.squash(mu, pi, log_pi)
+        return mu, pi, log_pi, log_std
+
+    def pi(self, z, std=0):
+        """Samples an action from the learned policy (pi)."""
+        mu = torch.tanh(self._pi(z))
+        if std > 0:
+            std = torch.ones_like(mu) * std
+            return h.TruncatedNormal(mu, std).sample(clip=0.3)
+        return mu

@@ -16,7 +16,7 @@ seed=$((SLURM_ARRAY_TASK_ID+2025))
 echo "Seed $seed"
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=7
 
 python -u train.py task=walker-walk num_envs=4 steps_per_update=4 compile=True
 
