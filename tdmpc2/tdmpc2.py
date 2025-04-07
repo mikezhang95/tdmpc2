@@ -259,7 +259,7 @@ z (torch.Tensor): Latent state from which to plan.
         """
         _, pis, log_pis, _ = self.model.pi(zs, task)
         qs = self.model.Q(zs, pis, task, return_type='avg', detach=True)
-        self.scale.update(qs[0])
+        self.scale.update(qs[0]) # normalize qs, speedup training \pi
         qs = self.scale(qs)
 
         # Loss is a weighted sum of Q-values

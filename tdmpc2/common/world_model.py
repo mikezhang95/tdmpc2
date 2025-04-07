@@ -431,6 +431,7 @@ class FacWorldModel(WorldModel):
     #     node_z, _ = self._encoder(node_obs)
     #     return node_z.view(*obs_dim[:-1], -1).contiguous()
  
+
 from common import tdmpc_utils
 class TOLD(WorldModel):
     """
@@ -445,7 +446,7 @@ class TOLD(WorldModel):
 
         self._encoder = tdmpc_utils.enc(cfg)
         self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
-        # self._pi = tdmpc_utils.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.action_dim)
+        # self._pi = tdmpc_utils.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.action_dim) # fixed std
 
         self._dynamics = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, cfg.latent_dim)
         self._reward = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, 1)
@@ -457,15 +458,21 @@ class TOLD(WorldModel):
 
         self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
         self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
-        self.init()
+        self.init() # target Q
 
     def encode(self, obs, task):
         return self._encoder(obs)
 
-    # def pi(self, z, std=0):
-    #     """Samples an action from the learned policy (pi)."""
+    # def pi(self, z, task):
+    #     """
+    #     Samples an action from the policy prior.
+    #     The policy prior is a Gaussian distribution with
+    #     mean and (log) std predicted by a neural network.
+    #     """
     #     mu = torch.tanh(self._pi(z))
-    #     if std > 0:
-    #         std = torch.ones_like(mu) * std
-    #         return h.TruncatedNormal(mu, std).sample(clip=0.3)
-    #     return mu
+    #     log_std = torch.log(torch.ones_like(mu) * self.cfg.min_std)
+    #     eps = torch.randn_like(mu)
+
+    #     log_pi = math.gaussian_logprob(eps, log_std, size=None) * 0.0
+    #     pi = mu + eps * log_std.exp()
+    #     return mu, pi, log_pi, log_std
