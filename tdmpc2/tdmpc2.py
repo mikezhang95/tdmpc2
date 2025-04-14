@@ -6,11 +6,12 @@ from common.scale import RunningScale
 from common.world_model import WorldModel
 from tensordict import TensorDict
 
-from common.world_model import FacWorldModel, TOLD
+from common.world_model import FacWorldModel
 import numpy as np
 import time
 from functools import wraps
 
+from common.world_model import TOLD, FacTOLD
 
 def benchmark_torch_function(func):
     """
@@ -56,7 +57,10 @@ class TDMPC2(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.device = torch.device('cuda:0')
-        self.model = TOLD(cfg).to(self.device)
+        if self.cfg.fac_model:
+            self.model = FacTOLD(cfg).to(self.device)
+        else:
+            self.model = TOLD(cfg).to(self.device)
         # if self.cfg.fac_model:
         #     self.model = FacWorldModel(cfg).to(self.device)
         # else:

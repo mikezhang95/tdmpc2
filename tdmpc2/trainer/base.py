@@ -1,3 +1,5 @@
+import os 
+
 class Trainer:
 	"""Base trainer class for TD-MPC2."""
 
@@ -8,6 +10,10 @@ class Trainer:
 		self.buffer = buffer
 		self.logger = logger
 		print('Architecture:', self.agent.model)
+
+		if os.path.exists(cfg.checkpoint):
+			self.agent.load(cfg.checkpoint)
+			print(f'Load checkpoint from {cfg.checkpoint}')
 
 	def eval(self):
 		"""Evaluate a TD-MPC2 agent."""

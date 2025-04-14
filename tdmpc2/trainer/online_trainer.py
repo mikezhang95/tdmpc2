@@ -43,7 +43,7 @@ class OnlineTrainer(Trainer):
 				self.logger.video.save(self._step)
 		return dict(
 			episode_reward=torch.cat(ep_rewards).mean(),
-			episode_success=info['success'].mean(),
+			episode_success=info['success'].float().mean(),
 		)
 
 	def to_td(self, obs, action=None, reward=None):
@@ -84,7 +84,7 @@ class OnlineTrainer(Trainer):
 					tds = torch.cat(self._tds)
 					train_metrics.update(
 						episode_reward=tds['reward'].nansum(0).mean(),
-						episode_success=info['success'].nanmean(),
+						episode_success=info['success'].float().nanmean(),
 					)
 					train_metrics.update(self.common_metrics())
 					self.logger.log(train_metrics, 'train')

@@ -143,3 +143,169 @@ class RandomShiftsAug(nn.Module):
 		shift *= 2.0 / (h + 2 * self.pad)
 		grid = base_grid + shift
 		return F.grid_sample(x, grid, padding_mode='zeros', align_corners=False)
+
+class FullyConnectedGraph(nn.Module):
+    """
+    FullyConnectedGraph layer with LayerNorm, activation, and optionally dropout.
+    M: currently doesn't need aggregate function in GNN, only use this structure to easily calculate node/edge features
+    """
+    def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0., use_edge=True, is_q=False):
+        super(FullyConnectedGraph, self).__init__()
+        self.num_nodes = num_nodes
+        self.num_edges = num_nodes * (num_nodes - 1) // 2
+
+        # Define custom MLPs or other functions for node and edge updates
+        # M: can be extended to non-shared networks, then use for-loop should run fast
+        self.shared_parameters = False # True
+        self.use_edge = use_edge
+        if self.shared_parameters:
+            self.node_update = mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
+            if self.use_edge:
+                self.edge_update = mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
+        else:
+            # naive implementation
+            # self.node_update = nn.ModuleList([mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_nodes)])
+            # self.edge_update = nn.ModuleList([mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_edges)])
+            node_dims = [node_in_dim] + mlp_dims + [node_out_dim]
+            self.node_update = []
+            for i in range(len(node_dims)-1):
+                if i == len(node_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
+                else: layer_act = nn.ELU(inplace=False)
+                if i == 0: layer_dropout = dropout
+                else: layer_dropout = 0.
+                use_layer_norm=False
+                if is_q and i==0 :
+                    use_layer_norm = True
+                    layer_act = nn.Tanh(inplace=False)
+                self.node_update.append(VectorizedLinearLayer(self.num_nodes, node_dims[i], node_dims[i+1], 
+                                                              use_layer_norm=use_layer_norm, act=layer_act, dropout=layer_dropout))
+            self.node_update = nn.Sequential(*self.node_update)
+
+            if self.use_edge:
+                edge_dims = [node_in_dim*2] + mlp_dims + [node_out_dim]
+                self.edge_update = []
+                for i in range(len(edge_dims)-1):
+                    if i == len(edge_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
+                    else: layer_act = nn.ELU(inplace=False)
+                    if i == 0: layer_dropout = dropout
+                    else: layer_dropout = 0.
+                    use_layer_norm=False
+                    if is_q and i==0 :
+                        use_layer_norm = True
+                        layer_act = nn.Tanh(inplace=False)
+                    self.edge_update.append(VectorizedLinearLayer(self.num_edges, edge_dims[i], edge_dims[i+1], 
+                                                                use_layer_norm=use_layer_norm, act=layer_act, dropout=layer_dropout))
+                self.edge_update = nn.Sequential(*self.edge_update)
+
+        # Create fully connected graph edges
+        edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T
+        # edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
+        self.edge_index = edge_index.to('cuda')
+        # self.register_buffer('edge_index', edge_index)  # TODO: Use register_buffer to move to CUDA automatically
+
+
+    def forward(self, node_features):
+        """
+        Args:
+            - node_features: [..., num_nodes, feature_dim]
+        """
+        # Reshape inputs to 3D vectors
+        raw_input_shape = node_features.shape # [..., num_nodes, input_dim]
+        node_features = node_features.view(-1, raw_input_shape[-2], raw_input_shape[-1]).contiguous() # [B, num_nodes, input_dim]
+
+        # Update node outputs
+        if self.shared_parameters:
+            node_outputs = self.node_update(node_features)
+        else:
+            node_outputs = node_features.transpose(1, 0) # [num_nodes, B, input_dim]
+            node_outputs = self.node_update(node_outputs) # [num_nodes, B, node_dim]
+            node_outputs = node_outputs.transpose(1, 0) # [B, num_nodes, node_dim]
+        # Reshape outputs back to 4D/3D vectors
+        node_outputs = node_outputs.view(*raw_input_shape[:-2], self.num_nodes, -1).contiguous() # [..., num_nodes, node_dim]
+
+        if self.use_edge:
+            # Compute edge features
+            src, dest = self.edge_index
+            edge_features = torch.cat([node_features[..., src, :], node_features[..., dest, :]], dim=-1) # [B, num_edges*2, input_dim]
+            if self.shared_parameters: 
+                edge_outputs = self.edge_update(edge_features)
+            else:
+                edge_outputs = edge_features.transpose(1, 0) # [num_edges*2, B, input_dim]
+                edge_outputs = self.edge_update(edge_outputs) # [num_edges*2, B, node_dim]
+                edge_outputs = edge_outputs.transpose(1, 0) # [B, num_edges*2, node_dim]
+            # Average i->j and j->i
+            # edge_outputs = torch.mean(edge_outputs.view(*edge_outputs.shape[:-2], self.num_edges, 2, -1), dim=-2) # [B, num_edges, input_dim]
+            # Reshape outputs back to 4D/3D vectors
+            edge_outputs = edge_outputs.view(*raw_input_shape[:-2], self.num_edges, -1).contiguous() # [..., num_edges, node_dim]
+            return node_outputs, edge_outputs
+        return node_outputs, None
+
+
+class VectorizedLinearLayer(nn.Module):
+    """Vectorized version of torch.nn.Linear."""
+
+    def __init__(
+        self,
+        population_size: int,
+        in_features: int,
+        out_features: int,
+        use_layer_norm: bool = False,
+        dropout: float = 0., 
+        act = None,
+    ):
+        super().__init__()
+        self._population_size = population_size
+        self._in_features = in_features
+        self._out_features = out_features
+
+        self.weight = torch.nn.Parameter(
+            torch.empty(self._population_size, self._in_features, self._out_features),
+            requires_grad=True,
+        )
+        self.bias = torch.nn.Parameter(
+            torch.empty(self._population_size, 1, self._out_features),
+            requires_grad=True,
+        )
+
+        for member_id in range(population_size):
+            torch.nn.init.kaiming_uniform_(self.weight[member_id], a=math.sqrt(5))
+        fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(self.weight[0])
+        bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+        torch.nn.init.uniform_(self.bias, -bound, bound)
+
+        self._layer_norm = (
+            torch.nn.LayerNorm(self._out_features, self._population_size)
+            if use_layer_norm
+            else None
+        )
+
+        # M: add activation and dropout
+        self._act = act
+        self._dropout = nn.Dropout(dropout, inplace=False) if dropout else None
+
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            - x: [population_size, batch_size, in_features]
+        Returns:
+            - x: [population_size, batch_size, out_features]
+        """
+        assert x.shape[0] == self._population_size
+        x = x.matmul(self.weight) + self.bias
+        if self._layer_norm is not None:
+            x = self._layer_norm(x)
+        if self._dropout:
+            x = self._dropout(x)
+        if self._act:
+            return self._act(x)
+        else: 
+            return x
+    
+    def __repr__(self):
+        repr_dropout = f", dropout={self._dropout.p}" if self._dropout else ", dropout=None"
+        repr_act = f"act={self._act.__class__.__name__})" if self._act else "act=None)"
+        return f"VectorizedLinearLayer(in_features={self._in_features}, "\
+            f"out_features={self._out_features}, "\
+            f"bias={self.bias is not None}{repr_dropout}, "\
+            f"{repr_act}"
