@@ -1,4 +1,5 @@
 from time import time
+import copy
 
 import torch
 from tensordict.tensordict import TensorDict
@@ -79,6 +80,9 @@ class OnlineTrainer(Trainer):
 					eval_metrics.update(self.common_metrics())
 					self.logger.log(eval_metrics, 'eval')
 					eval_next = False
+					buffer_path = f"{self.cfg.work_dir}/buffer.pt"
+					self.buffer.save(buffer_path)
+
 
 				if self._step > 0:
 					tds = torch.cat(self._tds)
@@ -110,7 +114,7 @@ class OnlineTrainer(Trainer):
 					num_updates = max(1, int(self.cfg.num_envs / self.cfg.steps_per_update))
 				for _ in range(num_updates):
 					_train_metrics = self.agent.update(self.buffer)
-				train_metrics.update(_train_metrics)
+				train_metrics.update(copy.deepcopy(_train_metrics))
 
 			self._step += self.cfg.num_envs
 	

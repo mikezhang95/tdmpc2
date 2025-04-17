@@ -1,3 +1,4 @@
+import os
 import torch
 from tensordict.tensordict import TensorDict
 from torchrl.data.replay_buffers import ReplayBuffer, LazyTensorStorage
@@ -94,3 +95,29 @@ class Buffer():
 		"""Sample a batch of subsequences from the buffer."""
 		td = self._buffer.sample().view(-1, self.cfg.horizon+1).permute(1, 0)
 		return self._prepare_batch(td)
+
+	def save(self, path):
+		"""Save the replay buffer state."""
+		if not hasattr(self, '_buffer'):
+			print("Buffer not initialized yet.")
+			return
+		save_data = {
+			'num_eps': self._num_eps,
+			# 'cfg': self.cfg,  # only if it's serializable
+			'storage_device': str(self._storage_device),
+			'buffer_state': self._buffer.state_dict()
+		}
+		torch.save(save_data, path)
+		print(f"Buffer saved to {path}")
+
+	def load(self, path):
+		"""Load the replay buffer from a file."""
+		load_data = torch.load(path, map_location='cpu')
+		self._num_eps = load_data['num_eps']
+		self._storage_device = torch.device(load_data['storage_device'])
+
+		# Recreate buffer and load its state dict
+		storage = LazyTensorStorage(self._capacity, device=self._storage_device)
+		self._buffer = self._reserve_buffer(storage)
+		self._buffer.load_state_dict(load_data['buffer_state'])
+		print(f"Buffer loaded from {path}")
