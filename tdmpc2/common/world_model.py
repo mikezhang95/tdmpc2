@@ -473,7 +473,7 @@ class FacTOLD(WorldModel):
         self.num_nodes = cfg.action_dim # number of agents
         self.num_edges = self.num_nodes * (self.num_nodes - 1) // 2 # fully_connected reward/value graph
         self.action_dim_node = 1
-        self.latent_dim_node = cfg.latent_dim # TODO: network size increased
+        self.latent_dim_node = cfg.latent_dim // cfg.action_dim # TODO: network size increased
         cfg.latent_dim = self.latent_dim_node * cfg.action_dim 
         self.cfg = cfg
 

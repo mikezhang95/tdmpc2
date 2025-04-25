@@ -128,8 +128,20 @@ class TDMPC2(torch.nn.Module):
         Args:
             fp (str or dict): Filepath or state dict to load.
         """
+        # state_dict = fp if isinstance(fp, dict) else torch.load(fp)
+        # self.model.load_state_dict(state_dict["model"])
+
+         # M: test warm start
         state_dict = fp if isinstance(fp, dict) else torch.load(fp)
-        self.model.load_state_dict(state_dict["model"])
+        model_state_dict = state_dict["model"]
+        new_dict = {k: v for k, v in model_state_dict.items() if "_dynamics" not in k}
+        self.model.load_state_dict(new_dict, strict=False)
+        self.model._encoder.require_grad = False
+        self.model._pi.require_grad = False
+        self.model._Qs.require_grad = False
+        # new_dict = {k[9:]: v for k, v in model_state_dict.items() if "_encoder" in k}
+        # self.model._encoder.load_state_dict(new_dict)
+        # self.model._encoder.require_grad = False
 
     @torch.no_grad()
     def act(self, obs, t0=False, eval_mode=False, task=None):
