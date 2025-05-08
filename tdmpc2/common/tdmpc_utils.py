@@ -176,23 +176,22 @@ class FullyConnectedGraph(nn.Module):
                 use_layer_norm=False
                 if is_q and i==0 :
                     use_layer_norm = True
-                    layer_act = nn.Tanh(inplace=False)
+                    layer_act = nn.Tanh()
                 self.node_update.append(VectorizedLinearLayer(self.num_nodes, node_dims[i], node_dims[i+1], 
                                                               use_layer_norm=use_layer_norm, act=layer_act, dropout=layer_dropout))
             self.node_update = nn.Sequential(*self.node_update)
-
             if self.use_edge:
                 edge_dims = [node_in_dim*2] + mlp_dims + [node_out_dim]
                 self.edge_update = []
                 for i in range(len(edge_dims)-1):
                     if i == len(edge_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
-                    else: layer_act = nn.ELU(inplace=False)
+                    else: layer_act = nn.ELU()
                     if i == 0: layer_dropout = dropout
                     else: layer_dropout = 0.
                     use_layer_norm=False
                     if is_q and i==0 :
                         use_layer_norm = True
-                        layer_act = nn.Tanh(inplace=False)
+                        layer_act = nn.Tanh()
                     self.edge_update.append(VectorizedLinearLayer(self.num_edges, edge_dims[i], edge_dims[i+1], 
                                                                 use_layer_norm=use_layer_norm, act=layer_act, dropout=layer_dropout))
                 self.edge_update = nn.Sequential(*self.edge_update)

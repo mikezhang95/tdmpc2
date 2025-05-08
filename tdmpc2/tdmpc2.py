@@ -57,10 +57,12 @@ class TDMPC2(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.device = torch.device('cuda:0')
+        # tdmpc-1
         if self.cfg.fac_model:
             self.model = FacTOLD(cfg).to(self.device)
         else:
             self.model = TOLD(cfg).to(self.device)
+        # tdmpc-2
         # if self.cfg.fac_model:
         #     self.model = FacWorldModel(cfg).to(self.device)
         # else:
@@ -70,7 +72,10 @@ class TDMPC2(torch.nn.Module):
             {'params': self.model._dynamics.parameters()},
             {'params': self.model._reward.parameters()},
             {'params': self.model._Qs.parameters()},
+            {'params': self.model._Qs_fac.parameters()},
             {'params': self.model._task_emb.parameters() if self.cfg.multitask else []},
+            {'params': self.model._reward_mixer.parameters() if hasattr(self.model, '_reward_mixer') else []},
+            {'params': self.model._value_mixer.parameters() if hasattr(self.model, '_value_mixer') else []},
             {'params': self.model.edge_logits if hasattr(self.model, 'edge_logits') else []}
         ], lr=self.cfg.lr, capturable=True)
         self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
@@ -128,20 +133,17 @@ class TDMPC2(torch.nn.Module):
         Args:
             fp (str or dict): Filepath or state dict to load.
         """
-        # state_dict = fp if isinstance(fp, dict) else torch.load(fp)
-        # self.model.load_state_dict(state_dict["model"])
-
-         # M: test warm start
         state_dict = fp if isinstance(fp, dict) else torch.load(fp)
-        model_state_dict = state_dict["model"]
-        new_dict = {k: v for k, v in model_state_dict.items() if "_dynamics" not in k}
-        self.model.load_state_dict(new_dict, strict=False)
+        # self.model.load_state_dict(state_dict["model"])
+        # M: test warm start
+        self.model.load_state_dict(state_dict["model"], strict=False)
+        # encoder_state_dict = {k[9:]: v for k, v in state_dict["model"].items() if "_encoder" in k}
+        # pi_state_dict = {k[4:]: v for k, v in state_dict["model"].items() if "_pi" in k}
+        # self.model._encoder.load_state_dict(encoder_state_dict)
+        # self.model._pi.load_state_dict(pi_state_dict)
         self.model._encoder.require_grad = False
-        self.model._pi.require_grad = False
-        self.model._Qs.require_grad = False
-        # new_dict = {k[9:]: v for k, v in model_state_dict.items() if "_encoder" in k}
-        # self.model._encoder.load_state_dict(new_dict)
-        # self.model._encoder.require_grad = False
+        # self.model._pi.require_grad = False
+        # self.model._Qs.require_grad = False
 
     @torch.no_grad()
     def act(self, obs, t0=False, eval_mode=False, task=None):
@@ -329,21 +331,26 @@ z (torch.Tensor): Latent state from which to plan.
         _zs = zs[:-1]
         qs = self.model.Q(_zs, action, task, return_type='all')
         reward_preds = self.model.reward(_zs, action, task)
-
+        fac_qs = self.model.Q_fac(_zs, action, task, return_type='all')
+        
         # Compute losses
         reward_loss, value_loss = 0, 0
-        for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
+        fac_value_loss = 0 
+        for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind, fac_qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1), fac_qs.unbind(1))):
             reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
-            for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
+            for _, (qs_unbind_unbind, fac_qs_unbind_unbind) in enumerate(zip(qs_unbind.unbind(0), fac_qs_unbind.unbind(0))):
                 value_loss = value_loss + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
+                fac_value_loss = fac_value_loss + math.soft_ce(qs_unbind_unbind.detach(), fac_qs_unbind_unbind, self.cfg).mean() * self.cfg.rho**t
 
         consistency_loss = consistency_loss / self.cfg.horizon
         reward_loss = reward_loss / self.cfg.horizon
         value_loss = value_loss / (self.cfg.horizon * self.cfg.num_q)
+        fac_value_loss = fac_value_loss / (self.cfg.horizon * self.cfg.num_q)
         total_loss = (
             self.cfg.consistency_coef * consistency_loss +
             self.cfg.reward_coef * reward_loss +
-            self.cfg.value_coef * value_loss
+            self.cfg.value_coef * value_loss + 
+            self.cfg.value_coef * fac_value_loss
         )
 
         # Update model
@@ -364,6 +371,7 @@ z (torch.Tensor): Latent state from which to plan.
             "consistency_loss": consistency_loss,
             "reward_loss": reward_loss,
             "value_loss": value_loss,
+            "fac_value_loss": fac_value_loss,
             "pi_loss": pi_loss,
             "total_loss": total_loss,
             "grad_norm": grad_norm,
