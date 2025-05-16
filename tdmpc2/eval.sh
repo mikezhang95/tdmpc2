@@ -18,6 +18,9 @@ echo "Seed $seed"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
-checkpoint=./logs/walker-walk/1/zero_edges/models/final.pt
+# checkpoint=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/latent60/models/final.pt
+# checkpoint=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/offline-fac_plan-mixer2/models/final.pt # 617
+checkpoint=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/offline-fac_plan-mixer1/models/final.pt # 764.4
+# checkpoint=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/offline-fac_plan-rho1.0/models/final.pt # 733.4
 
-python -u evaluate.py task=walker-walk checkpoint=$checkpoint eval_episodes=1
+python -u evaluate.py task=walker-run checkpoint=$checkpoint eval_episodes=2

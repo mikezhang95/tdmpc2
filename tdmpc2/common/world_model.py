@@ -421,17 +421,6 @@ class FacWorldModel(WorldModel):
             return Q.min(0).values
         return Q.sum(0) / 2
 
-    # def ind_encode(self, obs, task):
-    #     """
-    #     Encodes an observation into its latent representation.
-    #     This implementation assumes a single state-based observation.
-    #     """
-    #     # no multi-task and rgb support now
-    #     obs_dim = obs.shape
-    #     node_obs = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1) # [..., num_nodes, obs_dim]
-    #     node_z, _ = self._encoder(node_obs)
-    #     return node_z.view(*obs_dim[:-1], -1).contiguous()
- 
 
 from common import tdmpc_utils
 class TOLD(WorldModel):
@@ -470,52 +459,115 @@ class FacTOLD(WorldModel):
 
         nn.Module.__init__(self)
 
-        # M: current seperate agents by the action
+        # M: seperate action/state space for each action dimension
         self.num_nodes = cfg.action_dim # number of agents
         self.num_edges = self.num_nodes * (self.num_nodes - 1) // 2 # fully_connected reward/value graph
         self.action_dim_node = 1
-        # self.latent_dim_node = cfg.latent_dim // cfg.action_dim # TODO: network size increased
-        # self.latent_dim_node = 9 # 24 
-        # cfg.latent_dim = self.latent_dim_node * cfg.action_dim 
-        self.cfg = cfg
         self.latent_dim_node = cfg.latent_dim 
+        self.cfg = cfg
 
-        # tdmpc setup 
-        # centralized modules
-        self._encoder = tdmpc_utils.enc(cfg)
-        self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
-        # self._dynamics = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, cfg.latent_dim)
-        # self._reward = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, 1)
-        self._Qs = layers.Ensemble([tdmpc_utils.q(cfg) for _ in range(cfg.num_q)])
         # factored modules
-        # obs_dim = cfg.obs_shape['state'][0] 
-        # self._encoder = layers.FullyConnectedGraph(self.num_nodes, obs_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node) 
-        # self.encode = self.ind_encode
         self._dynamics = tdmpc_utils.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], self.latent_dim_node, use_edge=False) 
         self._reward = tdmpc_utils.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
-        lip_nn = torch.nn.Sequential(
-            lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
-            lmn.GroupSort(2),
-            lmn.LipschitzLinear(32, 1, kind="one"),
-        )
-        self._reward_mixer = lmn.MonotonicWrapper(lip_nn) 
-        # self._reward_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
-        self._Qs_fac = layers.Ensemble([tdmpc_utils.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
+        self._Qs = layers.Ensemble([tdmpc_utils.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
+        self._reward_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
         self._value_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
+        # lip_nn_reward = torch.nn.Sequential(
+        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
+        #     lmn.GroupSort(2),
+        #     lmn.LipschitzLinear(32, 1, kind="one"),
+        # )
+        # self._reward_mixer = lmn.MonotonicWrapper(lip_nn_reward) 
+        # lip_nn_value = torch.nn.Sequential(
+        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
+        #     lmn.GroupSort(2),
+        #     lmn.LipschitzLinear(32, 1, kind="one"),
+        # )
+        # self._value_mixer = lmn.MonotonicWrapper(lip_nn_value) 
 
         # init values
         self.apply(tdmpc_utils.orthogonal_init)
-        # init.zero_([self._reward[-1].weight, self._Qs.params["5", "weight"]])
-        # init.zero_([self._reward[-1].bias, self._Qs.params["5", "bias"]])
-        # init.zero_([self._reward.node_update[-1].weight, self._reward.edge_update[-1].weight, self._Qs.params["node_update", "2", "weight"], self._Qs.params["edge_update", "2", "weight"]])
-        # init.zero_([self._reward.node_update[-1].bias, self._reward.edge_update[-1].bias, self._Qs.params["node_update", "2", "bias"], self._Qs.params["edge_update", "2", "bias"]])
+        init.zero_([self._reward.node_update[-1].weight, self._reward.edge_update[-1].weight, self._Qs.params["node_update", "2", "weight"], self._Qs.params["edge_update", "2", "weight"]])
+        init.zero_([self._reward.node_update[-1].bias, self._reward.edge_update[-1].bias, self._Qs.params["node_update", "2", "bias"], self._Qs.params["edge_update", "2", "bias"]])
 
-        self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
-        self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
         self.init() # target Q
+# 
+    def _generate_node_features(self, z, a):
+        # M: duplicate latent states for each agent
+        # TODO: different observations for each agent
+        if z.shape[-1] != self.latent_dim_node * self.num_nodes:
+            z = z.repeat(*([1]*(len(z.shape)-1)), self.num_nodes) 
+        latent_node = torch.reshape(z, (*z.shape[:-1], self.num_nodes, self.latent_dim_node))
+        action_node = torch.reshape(a, (*a.shape[:-1], self.num_nodes, self.action_dim_node))
+        node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_nodes, node_dim]
+        return node_features
 
-    def encode(self, obs, task):
-        return self._encoder(obs)
+    def next(self, z, a, task, return_individual=False):
+        """
+        Predicts the next latent state given the current latent state and action.
+        Args:
+            - z: [*, hidden_dim] * might be 1 or 2 dims
+            - a: [*, action_dim] 
+        """
+        node_features = self._generate_node_features(z, a)
+        x, _ = self._dynamics(node_features) 
+        if return_individual:
+            x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim]
+        else:
+            # TODO: different ways to aggregate next latent
+            x = torch.mean(x, dim=-2) 
+        return x
+
+    def reward(self, z, a, task, return_individual=False):
+        """
+        Predicts instantaneous (single-step) reward.
+        """
+        node_features = self._generate_node_features(z, a)
+        reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
+        if return_individual:
+            return reward_nodes
+        else:
+            # total_reward = (torch.sum(reward_nodes, dim=-2) + 2 * torch.sum(reward_edges, dim=-2)) / (self.num_nodes + 2 * self.num_edges) # [*, num_bins]
+            total_reward = self._reward_mixer(reward_nodes.squeeze(-1))
+            return total_reward
+
+    def Q(self, z, a, task, return_type='min', target=False, detach=False, return_individual=False):
+        """
+        Predict state-action value.
+        `return_type` can be one of [`min`, `avg`, `all`]:
+            - `min`: return the minimum of two randomly subsampled Q-values.
+            - `avg`: return the average of two randomly subsampled Q-values.
+            - `all`: return all Q-values.
+        `target` specifies whether to use the target Q-networks or not.
+        """
+        assert return_type in {'min', 'avg', 'all'}
+
+        if target:
+            qnet = self._target_Qs
+        elif detach:
+            qnet = self._detach_Qs
+        else:
+            qnet = self._Qs
+
+        # M: generate qvalues
+        node_features = self._generate_node_features(z, a)
+        value_nodes, value_edges = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
+        if return_individual:
+            out = value_nodes
+        else:
+            # out = (torch.sum(value_nodes, dim=-2) + 2 * torch.sum(value_edges, dim=-2)) / (self.num_nodes + 2 * self.num_edges) # [*, num_bins] 
+            out = self._value_mixer(value_nodes.squeeze(-1))
+
+        if return_type == 'all':
+            return out
+
+        qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
+        Q = math.two_hot_inv(out[qidx], self.cfg)
+        if return_type == "min":
+            return Q.min(0).values
+        return Q.sum(0) / 2
+
+
 
     # def ind_encode(self, obs, task):
     #     """
@@ -534,60 +586,13 @@ class FacTOLD(WorldModel):
         # node_z, _ = self._encoder(node_obs)
         # return node_z.view(*obs_dim[:-1], -1).contiguous()
 
-    def _generate_node_features(self, z, a):
-        z = z.repeat(*([1]*(len(z.shape)-1)), self.num_nodes)
-        latent_node = torch.reshape(z, (*z.shape[:-1], self.num_nodes, self.latent_dim_node))
-        action_node = torch.reshape(a, (*a.shape[:-1], self.num_nodes, self.action_dim_node))
-        node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_nodes, node_dim]
-        return node_features
+        # obs_dim = cfg.obs_shape['state'][0] 
+        # self._encoder = layers.FullyConnectedGraph(self.num_nodes, obs_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node) 
+        # self.encode = self.ind_encode
 
-    def next(self, z, a, task):
-        """
-        Predicts the next latent state given the current latent state and action.
-        Args:
-            - z: [*, hidden_dim] * might be 1 or 2 dims
-            - a: [*, action_dim] 
-        """
-        node_features = self._generate_node_features(z, a)
-        x, _ = self._dynamics(node_features) 
-        # x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim]
-        x = torch.mean(x, dim=-2)
-        return x
-
-    def reward(self, z, a, task, output_agents=False):
-        """
-        Predicts instantaneous (single-step) reward.
-        """
-        node_features = self._generate_node_features(z, a)
-        reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
-        # total_reward = (torch.sum(reward_nodes, dim=-2) + 2 * torch.sum(reward_edges, dim=-2)) / (self.num_nodes + 2 * self.num_edges) # [*, num_bins]
-        total_reward = self._reward_mixer(reward_nodes.squeeze(-1))
-        return total_reward
-
-    def Q_fac(self, z, a, task, return_type='min', target=False, detach=False, output_agents=False):
-        """
-        Predict state-action value.
-        `return_type` can be one of [`min`, `avg`, `all`]:
-            - `min`: return the minimum of two randomly subsampled Q-values.
-            - `avg`: return the average of two randomly subsampled Q-values.
-            - `all`: return all Q-values.
-        `target` specifies whether to use the target Q-networks or not.
-        """
-        assert return_type in {'min', 'avg', 'all'}
-
-        qnet = self._Qs_fac
-
-        # M: generate qvalues
-        node_features = self._generate_node_features(z, a)
-        value_nodes, value_edges = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
-        # out = (torch.sum(value_nodes, dim=-2) + 2 * torch.sum(value_edges, dim=-2)) / (self.num_nodes + 2 * self.num_edges) # [*, num_bins] 
-        out = self._value_mixer(value_nodes.squeeze(-1))
-
-        if return_type == 'all':
-            return out
-
-        qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
-        Q = math.two_hot_inv(out[qidx], self.cfg)
-        if return_type == "min":
-            return Q.min(0).values
-        return Q.sum(0) / 2
+        # lip_nn = torch.nn.Sequential(
+        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
+        #     lmn.GroupSort(2),
+        #     lmn.LipschitzLinear(32, 1, kind="one"),
+        # )
+        # self._reward_mixer = lmn.MonotonicWrapper(lip_nn) 
