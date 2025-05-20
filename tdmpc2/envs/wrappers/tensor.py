@@ -38,6 +38,7 @@ class TensorWrapper(gym.Wrapper):
 			obs = self.env.reset(**kwargs)
 		else:
 			obs = self.env.reset()
+			obs = np.expand_dims(obs, axis=0)
 		return self._obs_to_tensor(obs)
 
 	def step(self, action, **kwargs):
@@ -45,11 +46,13 @@ class TensorWrapper(gym.Wrapper):
 			obs, reward, done, info = self.env.step(action.numpy(), **kwargs)
 		else:
 			obs, reward, done, info = self.env.step(action.numpy())
+			obs = np.expand_dims(obs, axis=0)
 		if isinstance(info, tuple):
 			info = {key: torch.stack([torch.tensor(d[key]) for d in info]) for key in info[0].keys()}
 			if 'success' not in info.keys():
 				info['success'] = torch.zeros(len(done))
 		else:
 			info = defaultdict(float, info)
-			info['success'] = float(info['success'])
+			# info['success'] = float(info['success'])
+			info['success'] = torch.tensor((info['success']))
 		return self._obs_to_tensor(obs), torch.tensor(reward, dtype=torch.float32), done, info

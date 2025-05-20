@@ -82,7 +82,7 @@ class OfflineTrainer(Trainer):
 		# 	f'Buffer has {self.buffer.num_eps} episodes, expected {expected_episodes} episodes.'
 		
 		print(f'Training agent for {self.cfg.steps} iterations...')
-		for i in range(self.cfg.steps):
+		for i in range(self.cfg.steps+1):
 			self._step = i
 
 			# Update agent

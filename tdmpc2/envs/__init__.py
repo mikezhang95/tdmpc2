@@ -54,7 +54,7 @@ def make_multitask_env(cfg):
 	return env
 	
 
-def make_env(cfg):
+def make_env(cfg, vec_env=True):
 	"""
 	Make an environment for TD-MPC2 experiments.
 	"""
@@ -73,7 +73,8 @@ def make_env(cfg):
 			raise ValueError(f'Failed to make environment "{cfg.task}": please verify that dependencies are installed and that the task exists.')
 		assert cfg.num_envs == 1 or cfg.get('obs', 'state') == 'state', \
 			'Vectorized environments only support state observations.'
-		env = Vectorized(cfg, fn)
+		if vec_env:
+			env = Vectorized(cfg, fn)
 		env = TensorWrapper(env)
 	if cfg.get('obs', 'state') == 'rgb':
 		env = PixelWrapper(cfg, env)
