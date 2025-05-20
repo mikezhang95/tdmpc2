@@ -51,7 +51,7 @@ def evaluate(cfg: dict):
 		print(colored('To evaluate a multi-task model, use task=mt80 or task=mt30.', 'red', attrs=['bold']))
 
 	# Make environment
-	env = make_env(cfg)
+	env = make_env(cfg, vec_env=False)
 
 	# Load agent
 	agent = TDMPC2(cfg)
