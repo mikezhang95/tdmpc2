@@ -467,40 +467,41 @@ class FacTOLD(WorldModel):
         self.cfg = cfg
 
         # factored modules
-        self._dynamics = tdmpc_utils.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], self.latent_dim_node, use_edge=False) 
-        self._reward = tdmpc_utils.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
-        self._Qs = layers.Ensemble([tdmpc_utils.FullyConnectedGraph(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
+        # obs_dim = cfg.latent_dim 
+        # self._encoder = tdmpc_utils.FacMLP(self.num_nodes, obs_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node)  # 26/60 -> 256 -> 60
+        self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.latent_dim * self.num_nodes)
+        self._dynamics = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], self.latent_dim_node) 
+        self._reward = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
+        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
         self._reward_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
         self._value_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
-        # lip_nn_reward = torch.nn.Sequential(
-        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
-        #     lmn.GroupSort(2),
-        #     lmn.LipschitzLinear(32, 1, kind="one"),
-        # )
-        # self._reward_mixer = lmn.MonotonicWrapper(lip_nn_reward) 
-        # lip_nn_value = torch.nn.Sequential(
-        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
-        #     lmn.GroupSort(2),
-        #     lmn.LipschitzLinear(32, 1, kind="one"),
-        # )
-        # self._value_mixer = lmn.MonotonicWrapper(lip_nn_value) 
 
         # init values
         self.apply(tdmpc_utils.orthogonal_init)
-        init.zero_([self._reward.node_update[-1].weight, self._reward.edge_update[-1].weight, self._Qs.params["node_update", "2", "weight"], self._Qs.params["edge_update", "2", "weight"]])
-        init.zero_([self._reward.node_update[-1].bias, self._reward.edge_update[-1].bias, self._Qs.params["node_update", "2", "bias"], self._Qs.params["edge_update", "2", "bias"]])
+        init.zero_([self._reward.node_update[-1].weight, self._Qs.params["node_update", "2", "weight"]])
+        init.zero_([self._reward.node_update[-1].bias, self._Qs.params["node_update", "2", "bias"]])
 
         self.init() # target Q
-# 
+ 
     def _generate_node_features(self, z, a):
-        # M: duplicate latent states for each agent
-        # TODO: different observations for each agent
-        if z.shape[-1] != self.latent_dim_node * self.num_nodes:
-            z = z.repeat(*([1]*(len(z.shape)-1)), self.num_nodes) 
+        """
+        Concat state and action for nodes
+        """
         latent_node = torch.reshape(z, (*z.shape[:-1], self.num_nodes, self.latent_dim_node))
         action_node = torch.reshape(a, (*a.shape[:-1], self.num_nodes, self.action_dim_node))
         node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_nodes, node_dim]
         return node_features
+
+    def encode(self, obs, task=None):
+        """
+        Encodes an observation into its latent representation.
+        This implementation assumes a single state-based observation.
+        """
+        # obs_dim = obs.shape # [..., latent_dim]
+        # node_z = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1)  # [..., num_nodes, node_dim]
+        # node_z = self._encoder(node_z) # w or w/o seperate encoder
+        # return node_z.view(*obs_dim[:-1], -1).contiguous()
+        return self._encoder(obs)
 
     def next(self, z, a, task, return_individual=False):
         """
@@ -510,12 +511,8 @@ class FacTOLD(WorldModel):
             - a: [*, action_dim] 
         """
         node_features = self._generate_node_features(z, a)
-        x, _ = self._dynamics(node_features) 
-        if return_individual:
-            x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim]
-        else:
-            # TODO: different ways to aggregate next latent
-            x = torch.mean(x, dim=-2) 
+        x = self._dynamics(node_features) # [*, num_agents, hidden_dim_node]
+        x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim_node * num_agents]
         return x
 
     def reward(self, z, a, task, return_individual=False):
@@ -523,7 +520,7 @@ class FacTOLD(WorldModel):
         Predicts instantaneous (single-step) reward.
         """
         node_features = self._generate_node_features(z, a)
-        reward_nodes, reward_edges = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
+        reward_nodes = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
         if return_individual:
             return reward_nodes
         else:
@@ -551,7 +548,7 @@ class FacTOLD(WorldModel):
 
         # M: generate qvalues
         node_features = self._generate_node_features(z, a)
-        value_nodes, value_edges = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
+        value_nodes = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
         if return_individual:
             out = value_nodes
         else:
@@ -579,6 +576,7 @@ class FacTOLD(WorldModel):
     #     node_obs = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1) # [..., num_nodes, obs_dim]
     #     node_z, _ = self._encoder(node_obs)
     #     return node_z.view(*obs_dim[:-1], -1).contiguous()
+    # 
         # agent_index = torch.tensor([[0,1,14,15,16,17,2,3,18], [0,1,14,15,16,17,4,5,19], [0,1,14,15,16,17,6,7,20], 
         #              [0,1,14,15,16,17,8,9,21], [0,1,14,15,16,17,10,11,22], [0,1,14,15,16,17,12,13,23]]).to(obs.device)
         # node_obs = torch.stack([node_obs[..., i, agent_index[i]] for i in range(self.num_nodes)], axis=-2)
@@ -596,3 +594,15 @@ class FacTOLD(WorldModel):
         #     lmn.LipschitzLinear(32, 1, kind="one"),
         # )
         # self._reward_mixer = lmn.MonotonicWrapper(lip_nn) 
+        # lip_nn_reward = torch.nn.Sequential(
+        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
+        #     lmn.GroupSort(2),
+        #     lmn.LipschitzLinear(32, 1, kind="one"),
+        # )
+        # self._reward_mixer = lmn.MonotonicWrapper(lip_nn_reward) 
+        # lip_nn_value = torch.nn.Sequential(
+        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
+        #     lmn.GroupSort(2),
+        #     lmn.LipschitzLinear(32, 1, kind="one"),
+        # )
+        # self._value_mixer = lmn.MonotonicWrapper(lip_nn_value) 

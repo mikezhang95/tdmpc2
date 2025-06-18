@@ -240,6 +240,59 @@ class FullyConnectedGraph(nn.Module):
         return node_outputs, None
 
 
+class FacMLP(nn.Module):
+    """
+    FullyConnectedGraph layer with LayerNorm, activation, and optionally dropout.
+    M: currently doesn't need aggregate function in GNN, only use this structure to easily calculate node/edge features
+    """
+    def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0., is_q=False):
+        super(FacMLP, self).__init__()
+        self.num_nodes = num_nodes
+
+        # Define custom MLPs or other functions for node and edge updates
+        # M: can be extended to non-shared networks, then use for-loop should run fast
+        self.shared_parameters = False # True
+        if self.shared_parameters:
+            self.node_update = mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
+        else:
+            # naive implementation
+            # self.node_update = nn.ModuleList([mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_nodes)])
+            node_dims = [node_in_dim] + mlp_dims + [node_out_dim]
+            self.node_update = []
+            for i in range(len(node_dims)-1):
+                if i == len(node_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
+                else: layer_act = nn.ELU(inplace=False)
+                if i == 0: layer_dropout = dropout
+                else: layer_dropout = 0.
+                use_layer_norm=False
+                if is_q and i==0 :
+                    use_layer_norm = True
+                    layer_act = nn.Tanh()
+                self.node_update.append(VectorizedLinearLayer(self.num_nodes, node_dims[i], node_dims[i+1], 
+                                                              use_layer_norm=use_layer_norm, act=layer_act, dropout=layer_dropout))
+            self.node_update = nn.Sequential(*self.node_update)
+
+    def forward(self, node_features):
+        """
+        Args:
+            - node_features: [..., num_nodes, feature_dim]
+        """
+        # Reshape inputs to 3D vectors
+        raw_input_shape = node_features.shape # [..., num_nodes, input_dim]
+        node_features = node_features.view(-1, raw_input_shape[-2], raw_input_shape[-1]).contiguous() # [B, num_nodes, input_dim]
+
+        # Update node outputs
+        if self.shared_parameters:
+            node_outputs = self.node_update(node_features)
+        else:
+            node_outputs = node_features.transpose(1, 0) # [num_nodes, B, input_dim]
+            node_outputs = self.node_update(node_outputs) # [num_nodes, B, node_dim]
+            node_outputs = node_outputs.transpose(1, 0) # [B, num_nodes, node_dim]
+        # Reshape outputs back to 4D/3D vectors
+        node_outputs = node_outputs.view(*raw_input_shape[:-2], self.num_nodes, -1).contiguous() # [..., num_nodes, node_dim]
+        return node_outputs
+
+
 class VectorizedLinearLayer(nn.Module):
     """Vectorized version of torch.nn.Linear."""
 
