@@ -15,13 +15,13 @@ eval_freq: 50000
 steps: 10_000_00
 batch_size: 512 # 256
 steps_per_update: 1
-reward_coef: 0.1
+reward_coef: 0.5 # 0.1
 value_coef: 0.1
 consistency_coef: 0.0 # 2 # 20
 rho: 1.0
-lr: 3e-4
+lr: 1e-4
 enc_lr_scale: 0.3
-grad_clip_norm: 20
+grad_clip_norm: 10 # 20
 tau: 0.01
 discount_denom: 5
 discount_min: 0.95
@@ -57,7 +57,7 @@ num_enc_layers: 2
 enc_dim: 256
 num_channels: 32
 mlp_dim: 512
-latent_dim: 512
+latent_dim: 60
 task_dim: 96
 num_q: 2
 dropout: 0.01
@@ -93,6 +93,6 @@ bin_size: ???
 compile: False
 
 # fac models
-model_type: fac-tdmpc2
+model_type: fac-tdmpc
 fac_plan: true
 helper_checkpoint: false

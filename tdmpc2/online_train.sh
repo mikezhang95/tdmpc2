@@ -18,5 +18,11 @@ echo "Seed $seed"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
-python -u train.py task=walker-run num_envs=4 steps_per_update=4 compile=True
+python -u train.py  task=walker-run \
+                    num_envs=5 \
+                    steps_per_update=5 \
+                    checkpoint=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/latent60/models/final.pt \
+                    exp_name=online-global_enc-rho1.0-std2 \
+                    compile=True
+
 

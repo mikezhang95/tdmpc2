@@ -1,5 +1,7 @@
 import torch
 import torch.nn.functional as F
+import os, sys
+from omegaconf import OmegaConf
 
 from common import math
 from common.scale import RunningScale
@@ -57,31 +59,39 @@ class TDMPC2(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.device = torch.device('cuda:0')
-        # tdmpc-1
-        self.model = TOLD(cfg).to(self.device)
-        if self.cfg.fac_model:
-            self.fac_model = FacTOLD(cfg).to(self.device)
-        # tdmpc-2
-        # if self.cfg.fac_model:
-        #     self.model = FacWorldModel(cfg).to(self.device)
-        # else:
-        #     self.model = WorldModel(cfg).to(self.device)
+        if self.cfg.helper_checkpoint:
+            helper_cfg = OmegaConf.load(os.path.join(self.cfg.helper_checkpoint, "config.yaml"))
+            helper_model_file = os.path.join(self.cfg.helper_checkpoint, "models/final.pt")
+            self.helper_model = TOLD(helper_cfg).to(self.device)
+            # self.helper_model = WorldModel(helper_cfg).to(self.device)
+            state_dict = torch.load(helper_model_file)
+            self.helper_model.load_state_dict(state_dict["model"])
+            self.helper_model.eval()
+
+        if self.cfg.model_type == "tdmpc":
+            self.model = TOLD(cfg).to(self.device)
+        elif self.cfg.model_type == "tdmpc2":
+            self.model = WorldModel(cfg).to(self.device)
+        elif self.cfg.model_type == "fac-tdmpc":
+            self.model = FacTOLD(cfg).to(self.device)
+        elif self.cfg.model_type == "fac-tdmpc2":
+            self.model = FacWorldModel(cfg).to(self.device)
+        else:
+            self.model = WorldModel(cfg).to(self.device)
+        
+        # TODO: removew warm start
+        # self.model._encoder.load_state_dict(self.helper_model._encoder.state_dict())
+        # self.model._encoder.requires_grad = False
+
         self.optim = torch.optim.Adam([
             {'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
             {'params': self.model._dynamics.parameters()},
             {'params': self.model._reward.parameters()},
             {'params': self.model._Qs.parameters()},
-            {'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
+            {'params': self.model._task_emb.parameters() if self.cfg.multitask else []},
+            {'params': self.model._reward_mixer.parameters() if hasattr(self.model, '_reward_mixer') else []},
+            {'params': self.model._value_mixer.parameters() if hasattr(self.model, '_value_mixer') else []},
             ], lr=self.cfg.lr, capturable=True)
-        if self.cfg.fac_model:
-            self.fac_optim = torch.optim.Adam([
-                {'params': self.fac_model._encoder.parameters()},
-                {'params': self.fac_model._dynamics.parameters()},
-                {'params': self.fac_model._reward.parameters()},
-                {'params': self.fac_model._Qs.parameters()},
-                {'params': self.fac_model._reward_mixer.parameters()},
-                {'params': self.fac_model._value_mixer.parameters()},
-                ], lr=self.cfg.lr, capturable=True)
         self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
         self.model.eval()
         self.scale = RunningScale(cfg)
@@ -129,8 +139,6 @@ class TDMPC2(torch.nn.Module):
             fp (str): Filepath to save state dict to.
         """
         state_dict = {"model": self.model.state_dict()}
-        if self.cfg.fac_model:
-            state_dict["fac_model"] = self.fac_model.state_dict()
         torch.save(state_dict, fp)
 
     def load(self, fp):
@@ -142,8 +150,6 @@ class TDMPC2(torch.nn.Module):
         """
         state_dict = fp if isinstance(fp, dict) else torch.load(fp)
         self.model.load_state_dict(state_dict["model"])
-        if self.cfg.fac_model and "fac_model" in state_dict:
-            self.fac_model.load_state_dict(state_dict["fac_model"])
 
     @torch.no_grad()
     def act(self, obs, t0=False, eval_mode=False, task=None):
@@ -170,29 +176,16 @@ class TDMPC2(torch.nn.Module):
         return a.cpu()
 
     @torch.no_grad()
-    def _estimate_value(self, z, actions, task):
+    def _estimate_value(self, z, actions, task, return_individual=True):
         """Estimate value of a trajectory starting at latent state z and executing given actions."""
         G, discount = 0, 1
-        for t in range(self.cfg.horizon - 1):
-            reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task), self.cfg)
+        for t in range(self.cfg.horizon - 1): 
+            reward = math.two_hot_inv(self.model.reward(z, actions[:, t], task, return_individual=return_individual), self.cfg)
             z = self.model.next(z, actions[:, t], task)
             G = G + discount * reward
             discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
             discount = discount * discount_update
-        return G + discount * self.model.Q(z, actions[:, -1], task, return_type='avg')
-        # return G + discount * self.model.Q(z, self.model.pi(z, task)[1], task, return_type='avg')
-
-    @torch.no_grad()
-    def _estimate_individual_value(self, z, actions, task, return_individual=True):
-        """Estimate value of a trajectory starting at latent state z and executing given actions."""
-        G, discount = 0, 1
-        for t in range(self.cfg.horizon - 1): 
-            reward = math.two_hot_inv(self.fac_model.reward(z, actions[:, t], task, return_individual=return_individual), self.cfg)
-            z = self.fac_model.next(z, actions[:, t], task, return_individual=True)
-            G = G + discount * reward
-            discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
-            discount = discount * discount_update
-        return G + discount * self.fac_model.Q(z, actions[:, -1], task, return_type='avg', return_individual=return_individual)
+        return G + discount * self.model.Q(z, actions[:, -1], task, return_type='avg', return_individual=return_individual)
         # return G + discount * self.fac_model.Q(z, self.model.pi(z, task)[1], task, return_type='avg', return_individual=True)
 
 
@@ -204,7 +197,7 @@ class TDMPC2(torch.nn.Module):
 
         Args:
             task (Torch.Tensor): Task index (only used for multi-task experiments).
-z (torch.Tensor): Latent state from which to plan.
+            z (torch.Tensor): Latent state from which to plan.
             t0 (bool): Whether this is the first observation in the episode.
             eval_mode (bool): Whether to use the mean of the action distribution.
                 
@@ -215,11 +208,19 @@ z (torch.Tensor): Latent state from which to plan.
         z = self.model.encode(obs, task)
         if self.cfg.num_pi_trajs > 0:
             pi_actions = torch.empty(self.cfg.num_envs, self.cfg.horizon, self.cfg.num_pi_trajs, self.cfg.action_dim, device=self.device)
-            _z = z.unsqueeze(1).repeat(1, self.cfg.num_pi_trajs, 1)
-            for t in range(self.cfg.horizon-1):
-                pi_actions[:,t] = self.model.pi(_z, task)[1]
-                _z = self.model.next(_z, pi_actions[:,t], task)
-            pi_actions[:,-1] = self.model.pi(_z, task)[1]
+            if self.cfg.helper_checkpoint:
+                hz = self.helper_model.encode(obs, task)
+                _hz = hz.unsqueeze(1).repeat(1, self.cfg.num_pi_trajs, 1)
+                for t in range(self.cfg.horizon-1):
+                    pi_actions[:,t] = self.helper_model.pi(_hz, task)[1]
+                    _hz = self.helper_model.next(_hz, pi_actions[:,t], task)
+                pi_actions[:,-1] = self.helper_model.pi(_hz, task)[1]
+            else:
+                _z = z.unsqueeze(1).repeat(1, self.cfg.num_pi_trajs, 1)
+                for t in range(self.cfg.horizon-1):
+                    pi_actions[:,t] = self.model.pi(_z, task)[1]
+                    _z = self.model.next(_z, pi_actions[:,t], task)
+                pi_actions[:,-1] = self.model.pi(_z, task)[1]
 
         # Initialize state and parameters
         z = z.unsqueeze(1).repeat(1, self.cfg.num_samples, 1)
@@ -243,22 +244,15 @@ z (torch.Tensor): Latent state from which to plan.
                 actions = actions * self.model._action_masks[task]
 
             # Compute elite actions
-            # decentralized version
-            if self.cfg.fac_plan and self.cfg.fac_model: 
-                # fac_z = self.fac_model.encode(obs, task)
-                # fac_z = fac_z.unsqueeze(1).repeat(1, self.cfg.num_samples, 1)
-                fac_z = self.fac_model.encode(z, task)
-                value = self._estimate_individual_value(fac_z, actions, task).nan_to_num(0).squeeze(-1) # [E, N, A]
+            if "fac" in self.cfg.model_type and self.cfg.fac_plan:
+                value = self._estimate_value(z, actions, task, return_individual=True).nan_to_num(0).squeeze(-1) # [E, N, A]
                 elite_idxs = torch.topk(value, self.cfg.num_elites, dim=1).indices # [E, EL, A]
                 elite_value = torch.gather(value, 1, elite_idxs) # [E, EL, A]
                 elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).expand(-1, self.cfg.horizon, -1, -1)) # [E, H, EL, A]
                 # central_value = self._estimate_value(z, actions, task).nan_to_num(0) # [E, N, 1] 
                 # pred_central_value = self._estimate_individual_value(z, actions, task, return_individual=False).nan_to_num(0) # [E, N, A]
                 # print(torch.mean(torch.abs(central_value - pred_central_value)))
-            # centralized version
             else: 
-                # fac_z = self.fac_model.encode(z, task)
-                # value = self._estimate_individual_value(fac_z, actions, task, return_individual=False).nan_to_num(0) # [E, N, A]
                 value = self._estimate_value(z, actions, task).nan_to_num(0) # [E, N, 1] 
                 elite_idxs = torch.topk(value.squeeze(2), self.cfg.num_elites, dim=1).indices # [E, EL]
                 elite_value = torch.gather(value, 1, elite_idxs.unsqueeze(2)) # [E, EL, 1]
@@ -276,12 +270,10 @@ z (torch.Tensor): Latent state from which to plan.
                 std = std * self.model._action_masks[task]
 
         # Select action
-        # decentralized version
-        if self.cfg.fac_plan and self.cfg.fac_model: 
+        if "fac" in self.cfg.model_type and self.cfg.fac_plan: # decentralized plan 
             rand_idx = torch.stack([math.gumbel_softmax_sample(score[..., i], dim=1) for i in range(self.cfg.action_dim)], dim=-1) # [E, A] gumbel_softmax_sample is compatible with cuda graphs
             actions = torch.gather(elite_actions, 2, rand_idx.unsqueeze(1).unsqueeze(2).expand(-1, self.cfg.horizon, -1, -1)).squeeze(2) # [E, H, A]
-        # centralized version
-        else: 
+        else: # centralized plan
             rand_idx = math.gumbel_softmax_sample(score.squeeze(2), dim=1)  # [E,] gumbel_softmax_sample is compatible with cuda graphs
             actions = elite_actions[torch.arange(self.cfg.num_envs), :, rand_idx] # [E, H, A]
         action, std = actions[:, 0], std[:, 0] # MPC run first step
@@ -303,7 +295,10 @@ z (torch.Tensor): Latent state from which to plan.
             float: Loss of the policy update.
         """
         _, pis, log_pis, _ = self.model.pi(zs, task)
-        qs = self.model.Q(zs, pis, task, return_type='avg', detach=True)
+        # TODO: remove detach cause compile fail!
+        qs = self.model.Q(zs, pis, task, return_type='avg', detach=True).detach()
+        # qs = self.model.Q(zs, pis, task, return_type='avg', detach=True)
+
         self.scale.update(qs[0]) # normalize qs, speedup training \pi
         qs = self.scale(qs)
 
@@ -312,7 +307,7 @@ z (torch.Tensor): Latent state from which to plan.
         pi_loss = ((self.cfg.entropy_coef * log_pis - qs).mean(dim=(1,2)) * rho).mean()
         pi_loss.backward()
         pi_grad_norm = torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm)
-        # self.pi_optim.step()
+        self.pi_optim.step()
         self.pi_optim.zero_grad(set_to_none=True)
 
         return pi_loss.detach(), pi_grad_norm
@@ -345,7 +340,7 @@ z (torch.Tensor): Latent state from which to plan.
         self.model.train()
 
         # Latent rollout
-        zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, self.cfg.latent_dim, device=self.device)
+        zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, self.model.latent_dim, device=self.device)
         z = self.model.encode(obs[0], task)
         zs[0] = z
         consistency_loss = 0
@@ -375,73 +370,43 @@ z (torch.Tensor): Latent state from which to plan.
             self.cfg.value_coef * value_loss
         )
 
-        # Update model
-        grad_norm = total_loss * 0.0
-        total_loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
-        # self.optim.step()
-        self.optim.zero_grad(set_to_none=True)
+        # Training with helper models
+        if self.cfg.helper_checkpoint:
 
-        # Training for factored models
-        if self.cfg.fac_model:
-            
-            # Compute targets
-            with torch.no_grad():
-                next_fac_z = self.fac_model.encode(zs[1:], task)
-                pi = self.model.pi(next_z, task)[1] # TODO: 
-                discount = self.discount[task].unsqueeze(-1) if self.cfg.multitask else self.discount
-                fac_td_targets = reward + discount * self.fac_model.Q(next_fac_z, pi, task, return_type='min', target=True)
-
-            # Prepare for update
-            self.fac_model.train()
-
-            # Factored latent rollout
-            fac_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, self.fac_model.latent_dim_node * self.fac_model.num_nodes, device=self.device)
-            fac_z = self.fac_model.encode(zs[0].clone().detach())
-            # fac_z = self.fac_model.encode(obs[0], task)
-            fac_zs[0] = fac_z
-            # TODO: consistency loss for ablation study?
-            fac_consistency_loss = 0
-            for t, (_action, _next_fac_z) in enumerate(zip(action.unbind(0), next_fac_z.unbind(0))):
-                fac_z = self.fac_model.next(fac_z, _action, task, return_individual=True)
-                fac_zs[t+1] = fac_z
-                fac_consistency_loss = fac_consistency_loss + F.mse_loss(fac_z, _next_fac_z) * self.cfg.rho**t
+            # TODO: training hyperparameters
+            a1, a2 = 0.0, 1.0
+            num_samples, std = 10, 2.0
 
             # Predictions
-            _fac_zs = fac_zs[:-1]
-            fac_reward_preds = self.fac_model.reward(_fac_zs, action, task)
-            fac_qs = self.fac_model.Q(_fac_zs, action, task, return_type='all')
-            pred_qs = self.model.Q(_zs, action, task, return_type='avg', detach=True).detach() # important to iso gradients
-
-            # Compute losses
-            fac_reward_loss, fac_value_loss = 0, 0
-            # M1: learn from detached qs instead of td_targets
-            # pred_qs = fac_td_targets
-
-            # M2: sample actions
-            num_samples = 40
-            std = 2.0
-            _fac_zs_sample = _fac_zs.repeat(1, num_samples, 1)
             _zs_sample = _zs.repeat(1, num_samples, 1)
             r = torch.randn(self.cfg.horizon, self.cfg.batch_size, num_samples, self.cfg.action_dim, device=action.device)
             action_sample = torch.reshape(action.unsqueeze(2) + std * r, (self.cfg.horizon, -1, self.cfg.action_dim))
-            fac_qs = self.fac_model.Q(_fac_zs_sample, action_sample, task, return_type='all')
-            pred_qs = self.model.Q(_zs_sample, action_sample, task, return_type='avg', detach=True).detach() # important to iso gradients
+            aug_reward_preds = self.model.reward(_zs_sample, action_sample, task)
+            aug_qs = self.model.Q(_zs_sample, action_sample, task, return_type='all')
 
-            for t, (rew_pred_unbind, rew_unbind, pred_qs_unbind, qs_unbind) in enumerate(zip(fac_reward_preds.unbind(0), reward.unbind(0), pred_qs.unbind(0), fac_qs.unbind(1))):
-                # M: only cares about the last q, and previous reward
-                fac_reward_loss = fac_reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
-                for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
-                    fac_value_loss = fac_value_loss + math.soft_ce(qs_unbind_unbind, pred_qs_unbind, self.cfg).mean() * self.cfg.rho**t
-            fac_reward_loss = fac_reward_loss / self.cfg.horizon
-            fac_value_loss = fac_value_loss / (self.cfg.horizon * self.cfg.num_q)
-            # fac_total_loss = self.cfg.reward_coef * fac_reward_loss + self.cfg.value_coef * fac_value_loss
-            fac_total_loss = self.cfg.consistency_coef * fac_consistency_loss + self.cfg.reward_coef * fac_reward_loss + self.cfg.value_coef * fac_value_loss
+            # Helper Predictions
+            helper_zs = self.helper_model.encode(obs[:-1].clone(), task).detach()
+            _helper_zs_sample = helper_zs.repeat(1, num_samples, 1)
+            helper_reward_preds = self.helper_model.reward(_helper_zs_sample, action_sample, task).detach()
+            helper_qs = self.helper_model.Q(_helper_zs_sample, action_sample, task, return_type='avg', detach=True).detach()
 
-            fac_total_loss.backward()
-            fac_grad_norm = torch.nn.utils.clip_grad_norm_(self.fac_model.parameters(), self.cfg.grad_clip_norm)
-            self.fac_optim.step()
-            self.fac_optim.zero_grad(set_to_none=True)
+            # Compute losses
+            helper_reward_loss, helper_value_loss = 0, 0
+            for t, (helper_rew_pred_unbind, aug_rew_pred_unbind, helper_qs_unbind, aug_qs_unbind) in enumerate(zip(helper_reward_preds.unbind(0), aug_reward_preds.unbind(0), helper_qs.unbind(0), aug_qs.unbind(1))):
+                helper_reward_loss = helper_reward_loss + math.soft_ce(aug_rew_pred_unbind, helper_rew_pred_unbind, self.cfg).mean() * self.cfg.rho**t
+                for _, aug_qs_unbind_unbind in enumerate(aug_qs_unbind.unbind(0)):
+                    helper_value_loss = helper_value_loss + math.soft_ce(aug_qs_unbind_unbind, helper_qs_unbind, self.cfg).mean() * self.cfg.rho**t
+            helper_reward_loss = helper_reward_loss / self.cfg.horizon
+            helper_value_loss = helper_value_loss / (self.cfg.horizon * self.cfg.num_q)
+            helper_loss = self.cfg.reward_coef * helper_reward_loss + self.cfg.value_coef * helper_value_loss
+            total_loss = a1 * total_loss + a2 * helper_loss
+
+        # Update model
+        total_loss.backward()
+        # TODO: this include pi's grads? or not
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
+        self.optim.step()
+        self.optim.zero_grad(set_to_none=True)
 
         # Update policy
         pi_loss, pi_grad_norm = self.update_pi(zs.detach(), task)
@@ -462,16 +427,11 @@ z (torch.Tensor): Latent state from which to plan.
             "pi_scale": self.scale.value,
         }).detach().mean()
 
-        if self.cfg.fac_model:
-            return_dict["fac_consistency_loss"] = fac_consistency_loss.detach().mean()
-            return_dict["fac_reward_loss"] = fac_reward_loss.detach().mean()
-            return_dict["fac_value_loss"] = fac_value_loss.detach().mean()
-            return_dict["fac_grad_norm"] = fac_grad_norm.detach().mean()
-            self.fac_model.eval()
+        # Training with helper models
+        if self.cfg.helper_checkpoint:
+            return_dict["helper_reward_loss"] = helper_reward_loss.detach().mean()
+            return_dict["helper_value_loss"] = helper_value_loss.detach().mean()
 
-        if hasattr(self.model, "adjacency_matrix"):
-            matrix = self.model.adjacency_matrix() 
-            return_dict["graph_matrix"] = (matrix * 255.0).to(dtype=torch.uint8) # normalize the pixels to [0, 255]
         return return_dict
 
     def update(self, buffer):

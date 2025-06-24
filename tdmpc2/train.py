@@ -9,6 +9,7 @@ import torch
 
 import hydra
 from termcolor import colored
+from omegaconf import OmegaConf
 
 from common.parser import parse_cfg
 from common.seed import set_seed
@@ -48,6 +49,8 @@ def train(cfg: dict):
 	cfg = parse_cfg(cfg)
 	set_seed(cfg.seed)
 	print(colored('Work dir:', 'yellow', attrs=['bold']), cfg.work_dir)
+	os.makedirs(cfg.work_dir, exist_ok=True)
+	OmegaConf.save(cfg, os.path.join(cfg.work_dir, "config.yaml"))
 
 	trainer_cls = OfflineTrainer if os.path.exists(cfg.data_dir) else OnlineTrainer
 	print(f'Trainer: {str(trainer_cls)}')

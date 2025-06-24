@@ -4,6 +4,13 @@ import torch.nn.functional as F
 
 def soft_ce(pred, target, cfg):
     """Computes the cross entropy loss between predictions and soft targets."""
+    target_num_bins = target.shape[-1]
+    if target_num_bins > 1:
+        num_bins_copy = cfg.num_bins
+        cfg.num_bins = target_num_bins
+        target = two_hot_inv(target, cfg)
+        cfg.num_bins = num_bins_copy 
+
     target = two_hot(target, cfg)
     if cfg.num_bins <= 1: # num_bins <=1 downgrade to mse
         return (target - pred)**2
