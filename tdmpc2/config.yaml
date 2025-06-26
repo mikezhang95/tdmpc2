@@ -13,15 +13,15 @@ eval_freq: 50000
 
 # training
 steps: 10_000_00
-batch_size: 512 # 256
+batch_size: 512
 steps_per_update: 1
-reward_coef: 0.5 # 0.1
+reward_coef: 0.5
 value_coef: 0.1
-consistency_coef: 2 # 20
+consistency_coef: 2.0
 rho: 0.5
-lr: 1e-3
-enc_lr_scale: 0.3
-grad_clip_norm: 10 # 20
+lr: 5e-4 # 1e-3
+enc_lr_scale: 1.0
+grad_clip_norm: 10
 tau: 0.01
 discount_denom: 5
 discount_min: 0.95
@@ -35,8 +35,8 @@ mpc: true
 iterations: 6
 num_samples: 512
 num_elites: 64
-num_pi_trajs: 24
-horizon: 3
+num_pi_trajs: 24 # 3
+horizon: 3 # 5
 min_std: 0.05
 max_std: 2
 temperature: 0.5
@@ -64,7 +64,7 @@ dropout: 0.01
 simnorm_dim: 8
 
 # logging
-wandb_project: tdmpc
+wandb_project: tdmpc-new
 wandb_entity: mikezhang95
 wandb_silent: false
 enable_wandb: true
@@ -92,8 +92,7 @@ bin_size: ???
 # speedups
 compile: False
 
-# fac models
-fac_model: False
-fac_plan: False
-edge_type: full_edges
-graph_temperature: 1.0
+# distill models
+fac_model: true
+fac_lr: 1e-4
+fac_rho: 1.0

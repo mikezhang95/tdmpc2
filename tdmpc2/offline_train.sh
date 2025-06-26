@@ -19,7 +19,8 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
 python -u train.py  task=walker-run \
-                    checkpoint=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/latent60/models/final.pt \
-                    exp_name=offline-fac_plan data_dir=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/baseline/buffer.pt \
-                    steps=600000 # compile=True
+                    exp_name=offline-fac \
+                    steps=500000 \
+                    data_dir=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/baseline/buffer.pt \
+                    compile=True 
 

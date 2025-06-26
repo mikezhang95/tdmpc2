@@ -461,27 +461,27 @@ class FacTOLD(WorldModel):
 
         # M: seperate action/state space for each action dimension
         self.num_nodes = cfg.action_dim # number of agents
-        self.num_edges = self.num_nodes * (self.num_nodes - 1) // 2 # fully_connected reward/value graph
         self.action_dim_node = 1
-        self.latent_dim_node = cfg.latent_dim 
+        self.latent_dim_node = cfg.latent_dim  # TODO: // 5
         self.cfg = cfg
 
         # factored modules
         # obs_dim = cfg.latent_dim 
         # self._encoder = tdmpc_utils.FacMLP(self.num_nodes, obs_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node)  # 26/60 -> 256 -> 60
-        self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.mlp_dim, cfg.latent_dim * self.num_nodes)
+        self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.mlp_dim, self.latent_dim_node * self.num_nodes)
         self._dynamics = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], self.latent_dim_node) 
         self._reward = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
         self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
         self._reward_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
         self._value_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
+        # self._reward_mixer = MixNet(self.num_nodes, cfg.latent_dim)
+        # self._value_mixer = MixNet(self.num_nodes, cfg.latent_dim)
 
         # init values
         self.apply(tdmpc_utils.orthogonal_init)
         init.zero_([self._reward.node_update[-1].weight, self._Qs.params["node_update", "2", "weight"]])
         init.zero_([self._reward.node_update[-1].bias, self._Qs.params["node_update", "2", "bias"]])
-
-        self.init() # target Q
+        # self.init() # target Q
  
     def _generate_node_features(self, z, a):
         """
@@ -515,7 +515,7 @@ class FacTOLD(WorldModel):
         x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim_node * num_agents]
         return x
 
-    def reward(self, z, a, task, return_individual=False):
+    def reward(self, z, a, task, return_individual=False, global_z=None):
         """
         Predicts instantaneous (single-step) reward.
         """
@@ -524,11 +524,11 @@ class FacTOLD(WorldModel):
         if return_individual:
             return reward_nodes
         else:
-            # total_reward = (torch.sum(reward_nodes, dim=-2) + 2 * torch.sum(reward_edges, dim=-2)) / (self.num_nodes + 2 * self.num_edges) # [*, num_bins]
             total_reward = self._reward_mixer(reward_nodes.squeeze(-1))
+            # total_reward = self._reward_mixer(reward_nodes.squeeze(-1), global_z)
             return total_reward
 
-    def Q(self, z, a, task, return_type='min', target=False, detach=False, return_individual=False):
+    def Q(self, z, a, task, return_type='min', target=False, detach=False, return_individual=False, global_z=None):
         """
         Predict state-action value.
         `return_type` can be one of [`min`, `avg`, `all`]:
@@ -538,13 +538,7 @@ class FacTOLD(WorldModel):
         `target` specifies whether to use the target Q-networks or not.
         """
         assert return_type in {'min', 'avg', 'all'}
-
-        if target:
-            qnet = self._target_Qs
-        elif detach:
-            qnet = self._detach_Qs
-        else:
-            qnet = self._Qs
+        qnet = self._Qs
 
         # M: generate qvalues
         node_features = self._generate_node_features(z, a)
@@ -552,8 +546,8 @@ class FacTOLD(WorldModel):
         if return_individual:
             out = value_nodes
         else:
-            # out = (torch.sum(value_nodes, dim=-2) + 2 * torch.sum(value_edges, dim=-2)) / (self.num_nodes + 2 * self.num_edges) # [*, num_bins] 
             out = self._value_mixer(value_nodes.squeeze(-1))
+            # out = self._value_mixer(value_nodes.squeeze(-1), global_z)
 
         if return_type == 'all':
             return out
@@ -565,44 +559,44 @@ class FacTOLD(WorldModel):
         return Q.sum(0) / 2
 
 
+class MixNet(nn.Module):
+    """
+    Inspired from QMIX
+    """
+    def __init__(self,
+                num_agents,
+                state_shape,
+                mixing_hidden_size=64):
 
-    # def ind_encode(self, obs, task):
-    #     """
-    #     Encodes an observation into its latent representation.
-    #     This implementation assumes a single state-based observation.
-    #     """
-    #     # no multi-task and rgb support now
-    #     obs_dim = obs.shape
-    #     node_obs = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1) # [..., num_nodes, obs_dim]
-    #     node_z, _ = self._encoder(node_obs)
-    #     return node_z.view(*obs_dim[:-1], -1).contiguous()
-    # 
-        # agent_index = torch.tensor([[0,1,14,15,16,17,2,3,18], [0,1,14,15,16,17,4,5,19], [0,1,14,15,16,17,6,7,20], 
-        #              [0,1,14,15,16,17,8,9,21], [0,1,14,15,16,17,10,11,22], [0,1,14,15,16,17,12,13,23]]).to(obs.device)
-        # node_obs = torch.stack([node_obs[..., i, agent_index[i]] for i in range(self.num_nodes)], axis=-2)
-        # # return node_obs.view(*obs_dim[:-1], -1).contiguous()
-        # node_z, _ = self._encoder(node_obs)
-        # return node_z.view(*obs_dim[:-1], -1).contiguous()
+        super(MixNet, self).__init__()
 
-        # obs_dim = cfg.obs_shape['state'][0] 
-        # self._encoder = layers.FullyConnectedGraph(self.num_nodes, obs_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node) 
-        # self.encode = self.ind_encode
+        self.num_agents = num_agents
+        self.state_shape = state_shape
+        self.mixing_hidden_size = mixing_hidden_size
 
-        # lip_nn = torch.nn.Sequential(
-        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
-        #     lmn.GroupSort(2),
-        #     lmn.LipschitzLinear(32, 1, kind="one"),
-        # )
-        # self._reward_mixer = lmn.MonotonicWrapper(lip_nn) 
-        # lip_nn_reward = torch.nn.Sequential(
-        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
-        #     lmn.GroupSort(2),
-        #     lmn.LipschitzLinear(32, 1, kind="one"),
-        # )
-        # self._reward_mixer = lmn.MonotonicWrapper(lip_nn_reward) 
-        # lip_nn_value = torch.nn.Sequential(
-        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
-        #     lmn.GroupSort(2),
-        #     lmn.LipschitzLinear(32, 1, kind="one"),
-        # )
-        # self._value_mixer = lmn.MonotonicWrapper(lip_nn_value) 
+        # Used to generate mixing network
+        self.hyper_net1 = nn.Linear(self.state_shape, self.num_agents * self.mixing_hidden_size)
+        self.hyper_net2 = nn.Linear(self.state_shape, self.mixing_hidden_size)
+
+    def forward(self, agent_qs, global_state):
+        """
+        The forward model takes the state to be given to the hyper-networks
+        and agent observations as a single tensor (concatenation of
+        agent local current observation, one-hot encoded last action, one-hot encoded agent_id)
+        :param global_state: state_shape
+        :param agent_obs: num_agents x agent_shape
+        :return: qtot
+        """
+        # Weights for the Mixing Network (absolute for monotonicity)
+        w1 = self.hyper_net1(global_state).abs()
+        w2 = self.hyper_net2(global_state).abs()
+
+        # Reshape for Mixing Network
+        state_shape = global_state.shape
+        w1 = w1.view(*state_shape[:-1], self.num_agents, self.mixing_hidden_size)
+        w2 = w2.view(*state_shape[:-1], self.mixing_hidden_size, 1)
+
+        # Calculate mixing of agent values for q_tot
+        q_tot = nn.functional.elu(torch.matmul(agent_qs.unsqueeze(-2), w1))
+        q_tot = nn.functional.elu(torch.matmul(q_tot, w2)).squeeze(-2)
+        return q_tot

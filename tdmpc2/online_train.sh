@@ -18,5 +18,9 @@ echo "Seed $seed"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
-python -u train.py task=walker-run num_envs=4 steps_per_update=4 compile=True
+python -u train.py task=walker-run \
+                exp_name=online-fac \
+                num_envs=4 \
+                steps_per_update=4 \
+                compile=True
 
