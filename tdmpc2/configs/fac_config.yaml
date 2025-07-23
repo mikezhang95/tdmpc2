@@ -94,7 +94,10 @@ compile: False
 
 # distill models
 fac_model: true
+fac_reward_coef: 0.0
+fac_value_coef: 0.1
+fac_consistency_coef: 0.0
 fac_lr: 1e-4
 fac_rho: 1.0
-num_samples: 10 
-std_samples: 0.2
+num_noises: 10
+std_noises: 0.2

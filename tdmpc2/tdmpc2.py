@@ -393,20 +393,20 @@ z (torch.Tensor): Latent state from which to plan.
             self.fac_model.train()
 
             # sampled parameters
-            num_samples, std_samples = self.cfg.num_samples, self.cfg.std_samples
+            num_noises, std_noises = self.cfg.num_noises, self.cfg.std_noises
 
             # sampled actions
-            r = torch.randn(self.cfg.horizon, self.cfg.batch_size, num_samples, self.cfg.action_dim, device=action.device)
-            action_sample = action.unsqueeze(2) + std_samples * r # [H, BS, NS, A]
+            r = torch.randn(self.cfg.horizon, self.cfg.batch_size, num_noises, self.cfg.action_dim, device=action.device)
+            action_sample = action.unsqueeze(2) + std_noises * r # [H, BS, NS, A]
             # sampled fac zs and its self-predictive version
-            fac_z = self.fac_model.encode(zs[0].clone().detach()).unsqueeze(1).repeat(1, noised_samples, 1) # [BS, NS, FS]
-            fac_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, noised_samples, self.fac_model.latent_dim_node * self.fac_model.num_nodes, device=self.device) # [H, BS, NS, FS]
+            fac_z = self.fac_model.encode(zs[0].clone().detach()).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS]
+            fac_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.fac_model.latent_dim_node * self.fac_model.num_nodes, device=self.device) # [H, BS, NS, FS]
             fac_zs[0] = fac_z
-            fac_zs_sp = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, noised_samples, self.fac_model.latent_dim_node * self.fac_model.num_nodes, device=self.device) # [H, BS, NS, FS]
+            fac_zs_sp = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.fac_model.latent_dim_node * self.fac_model.num_nodes, device=self.device) # [H, BS, NS, FS]
             fac_zs_sp[0] = fac_z.detach() # self_predictive
             # sampled zs
-            new_z = zs[0].clone().detach().unsqueeze(1).repeat(1, noised_samples, 1) # [BS, NS, S]
-            new_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, noised_samples, self.cfg.latent_dim, device=self.device) # [H, BS, NS, S]
+            new_z = zs[0].clone().detach().unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, S]
+            new_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.cfg.latent_dim, device=self.device) # [H, BS, NS, S]
             new_zs[0] = new_z
             # rollout in latent space
             fac_consistency_loss = 0.0
@@ -421,8 +421,8 @@ z (torch.Tensor): Latent state from which to plan.
 
             _fac_zs_sample = fac_zs[:-1]
             _fac_zs_sample = _fac_zs_sample.view(self.cfg.horizon, -1, self.fac_model.latent_dim_node * self.fac_model.num_nodes) # [H+1, BS*NS, FS]
-            _zs_sample = _zs_sample.view(self.cfg.horizon, -1, self.cfg.latent_dim) # [H+1, BS*NS, S]
             _zs_sample = new_zs[:-1]
+            _zs_sample = _zs_sample.view(self.cfg.horizon, -1, self.cfg.latent_dim) # [H+1, BS*NS, S]
             action_sample = action_sample.view(self.cfg.horizon, -1, self.cfg.action_dim)
 
             # MC: monotonic on which functions
@@ -452,15 +452,16 @@ z (torch.Tensor): Latent state from which to plan.
             fac_return, global_return = 0.0, 0.0
             discount = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
             for t, (pred_rew_unbind, rew_unbind, pred_qs_unbind, qs_unbind) in enumerate(zip(fac_rewards.unbind(0), target_rewards.unbind(0), fac_qs.unbind(1), target_qs.unbind(0))):
-                    tmp_global_return = global_return + qs_unbind * discount**t
-                    for _, pred_qs_unbind_unbind in enumerate(pred_qs_unbind.unbind(0)):
-                        tmp_fac_return = fac_return + pred_qs_unbind_unbind * discount**t
-                        tmp_fac_return_mix = self.fac_model._value_mixer(tmp_fac_return.squeeze(-1)) # , _zs_sample[0])
-                        fac_value_loss = fac_value_loss + math.soft_ce(tmp_fac_return_mix, tmp_global_return, self.cfg).mean()  * self.cfg.fac_rho**t
-                    pred_rew_unbind_mix = self.fac_model._reward_mixer(pred_rew_unbind.squeeze(-1))
-                    fac_reward_loss = fac_reward_loss + math.soft_ce(pred_rew_unbind_mix, rew_unbind, self.cfg).mean() * self.cfg.fac_rho**t
-                    fac_return += pred_rew_unbind * discount**t
-                    global_return += rew_unbind * discount**t
+                tmp_global_return = global_return + qs_unbind * discount**t
+                for _, pred_qs_unbind_unbind in enumerate(pred_qs_unbind.unbind(0)):
+                    if t < self.cfg.horizon - 1: break # new2
+                    tmp_fac_return = fac_return + pred_qs_unbind_unbind * discount**t
+                    tmp_fac_return_mix = self.fac_model._value_mixer(tmp_fac_return.squeeze(-1) ) #, _zs_sample[0])
+                    fac_value_loss = fac_value_loss + math.soft_ce(tmp_fac_return_mix, tmp_global_return, self.cfg).mean()  * self.cfg.fac_rho**t
+                pred_rew_unbind_mix = self.fac_model._reward_mixer(pred_rew_unbind.squeeze(-1) ) #, _zs_sample[0])
+                fac_reward_loss = fac_reward_loss + math.soft_ce(pred_rew_unbind_mix, rew_unbind, self.cfg).mean() * self.cfg.fac_rho**t
+                fac_return += pred_rew_unbind * discount**t
+                global_return += rew_unbind * discount**t
             fac_reward_loss = fac_reward_loss / self.cfg.horizon
             fac_value_loss = fac_value_loss / (self.cfg.horizon * self.cfg.num_q)
             # ======== # 

@@ -484,7 +484,7 @@ class FacTOLD(WorldModel):
         # self._value_mixer = lmn.MonotonicLayer(self.num_nodes + cfg.latent_dim, 1, monotonic_constraints=[1]*self.num_nodes+[0]*cfg.latent_dim)
         # lip_nn = nn.Sequential(
         #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
-        #     lmn.GroupSort(self.num_nodes  ),
+        #     lmn.GroupSort(2),
         #     lmn.LipschitzLinear(32, 1, kind="inf"),
         # )
         # self._value_mixer = lmn.MonotonicWrapper(lip_nn, monotonic_constraints=[1]*self.num_nodes) # 2 layer
