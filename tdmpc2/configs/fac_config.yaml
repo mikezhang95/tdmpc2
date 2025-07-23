@@ -8,20 +8,20 @@ num_envs: 1
 
 # evaluation
 checkpoint: ???
-eval_episodes: 2 # 10
+eval_episodes: 10
 eval_freq: 50000
 
 # training
 steps: 10_000_00
-batch_size: 512 # 256
+batch_size: 512
 steps_per_update: 1
-reward_coef: 0.5 # 0.1
+reward_coef: 0.5
 value_coef: 0.1
-consistency_coef: 0.0 # 2 # 20
-rho: 1.0 # 0.5
-lr: 1e-4
-enc_lr_scale: 0.3
-grad_clip_norm: 10 # 20
+consistency_coef: 2.0
+rho: 0.5
+lr: 5e-4 # 1e-3
+enc_lr_scale: 1.0
+grad_clip_norm: 10
 tau: 0.01
 discount_denom: 5
 discount_min: 0.95
@@ -36,7 +36,7 @@ iterations: 6
 num_samples: 512
 num_elites: 64
 num_pi_trajs: 24
-horizon: 3
+horizon: 3 # 5
 min_std: 0.05
 max_std: 0.05 # 2.0
 temperature: 0.5
@@ -57,14 +57,14 @@ num_enc_layers: 2
 enc_dim: 256
 num_channels: 32
 mlp_dim: 512
-latent_dim: 60
+latent_dim: 50
 task_dim: 96
 num_q: 2
 dropout: 0.01
 simnorm_dim: 8
 
 # logging
-wandb_project: tdmpc
+wandb_project: tdmpc-new
 wandb_entity: mikezhang95
 wandb_silent: false
 enable_wandb: true
@@ -92,8 +92,9 @@ bin_size: ???
 # speedups
 compile: False
 
-# fac models
+# distill models
 fac_model: true
-fac_plan: true
-edge_type: full_edges
-graph_temperature: 1.0
+fac_lr: 1e-4
+fac_rho: 1.0
+num_samples: 10 
+std_samples: 0.2

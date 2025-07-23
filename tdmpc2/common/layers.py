@@ -314,3 +314,63 @@ class VectorizedLinearLayer(nn.Module):
             f"out_features={self._out_features}, "\
             f"bias={self.bias is not None}{repr_dropout}, "\
             f"{repr_act}"
+
+
+class QMIXNet(nn.Module):
+    """
+    Inspired from QMIX
+    """
+    def __init__(self,
+                num_agents,
+                state_dim,
+                num_layers=2,
+                mixing_hidden_size=32):
+
+        super(QMIXNet, self).__init__()
+
+        self.num_agents = num_agents
+        self.state_dim = state_dim
+        self.mixing_hidden_size = mixing_hidden_size
+        self.num_layers = num_layers
+
+        # Generate mixing network
+        if num_layers == 2:
+            self.hyper_w_1 = nn.Linear(self.state_dim, self.num_agents * self.mixing_hidden_size)
+            self.hyper_b_1 = nn.Linear(self.state_dim, self.mixing_hidden_size)
+            self.l2_dim = self.mixing_hidden_size
+        elif num_layers == 1:
+            self.l2_dim = self.num_agents
+        self.hyper_w_2 = nn.Linear(self.state_dim, self.l2_dim)
+        self.hyper_b_2 = nn.Sequential(nn.Linear(self.state_dim, self.mixing_hidden_size),
+                               nn.ReLU(),
+                               nn.Linear(self.mixing_hidden_size, 1))
+
+    def forward(self, agent_qs, global_state):
+        """
+        The forward model takes the state to be given to the hyper-networks
+        and agent observations as a single tensor (concatenation of
+        agent local current observation, one-hot encoded last action, one-hot encoded agent_id)
+        """
+        state_shape = global_state.shape
+
+        if self.num_layers == 2:
+            # First layer 
+            w1 = self.hyper_w_1(global_state)
+            w1 = w1.view(*state_shape[:-1], self.num_agents, self.mixing_hidden_size)
+            # w1 = torch.abs(w1)
+            w1 = F.softmax(w1, dim=-1)
+            b1 = self.hyper_b_1(global_state)
+            b1 = b1.view(*state_shape[:-1], 1, self.mixing_hidden_size)
+            q_tot = nn.functional.elu(torch.matmul(agent_qs.unsqueeze(-2), w1) + b1)
+        else:
+            q_tot = agent_qs.unsqueeze(-2)
+
+        # Second layer 
+        w2 = self.hyper_w_2(global_state)
+        w2 = w2.view(*state_shape[:-1], self.l2_dim, 1)
+        # w2 = torch.abs(w2)
+        w2 = F.softmax(w2, dim=-2)
+        b2 = self.hyper_b_2(global_state)
+        b2 = b2.view(*state_shape[:-1], 1, 1)
+        q_tot = torch.matmul(q_tot, w2) + b2
+        return q_tot.squeeze(-2)

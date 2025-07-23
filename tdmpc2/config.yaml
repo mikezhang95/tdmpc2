@@ -35,10 +35,10 @@ mpc: true
 iterations: 6
 num_samples: 512
 num_elites: 64
-num_pi_trajs: 24 # 3
+num_pi_trajs: 24
 horizon: 3 # 5
 min_std: 0.05
-max_std: 2
+max_std: 0.05 # 2.0
 temperature: 0.5
 
 # actor
@@ -94,5 +94,10 @@ compile: False
 
 # distill models
 fac_model: true
+fac_reward_coef: 0.0
+fac_value_coef: 0.1
+fac_consistency_coef: 0.0
 fac_lr: 1e-4
 fac_rho: 1.0
+num_samples: 10 
+std_samples: 0.2

@@ -459,6 +459,7 @@ class FacTOLD(WorldModel):
 
         nn.Module.__init__(self)
 
+        # MC: action/latent dimensions
         # M: seperate action/state space for each action dimension
         self.num_nodes = cfg.action_dim # number of agents
         self.action_dim_node = 1
@@ -466,16 +467,37 @@ class FacTOLD(WorldModel):
         self.cfg = cfg
 
         # factored modules
+        # MC: fac encoders
         # obs_dim = cfg.latent_dim 
         # self._encoder = tdmpc_utils.FacMLP(self.num_nodes, obs_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node)  # 26/60 -> 256 -> 60
         self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.mlp_dim, self.latent_dim_node * self.num_nodes)
+
         self._dynamics = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], self.latent_dim_node) 
         self._reward = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
         self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
+
+        # MC: mixing network
+        # === LMN ===
         self._reward_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
         self._value_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
-        # self._reward_mixer = MixNet(self.num_nodes, cfg.latent_dim)
-        # self._value_mixer = MixNet(self.num_nodes, cfg.latent_dim)
+        # self._reward_mixer = lmn.MonotonicLayer(self.num_nodes + cfg.latent_dim, 1, monotonic_constraints=[1]*self.num_nodes+[0]*cfg.latent_dim)
+        # self._value_mixer = lmn.MonotonicLayer(self.num_nodes + cfg.latent_dim, 1, monotonic_constraints=[1]*self.num_nodes+[0]*cfg.latent_dim)
+        # lip_nn = nn.Sequential(
+        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
+        #     lmn.GroupSort(self.num_nodes  ),
+        #     lmn.LipschitzLinear(32, 1, kind="inf"),
+        # )
+        # self._value_mixer = lmn.MonotonicWrapper(lip_nn, monotonic_constraints=[1]*self.num_nodes) # 2 layer
+
+        # === VDN ===
+        # self._reward_mixer = nn.AvgPool1d(self.num_nodes)
+        # self._value_mixer = nn.AvgPool1d(self.num_nodes)
+
+        # === QMIX ===
+        # self._reward_mixer = layers.QMIXNet(self.num_nodes, self.cfg.latent_dim) # 2 layer
+        # self._value_mixer = layers.QMIXNet(self.num_nodes, self.cfg.latent_dim) # 2 layer
+        # self._reward_mixer = layers.QMIXNet2self.num_nodes, self.cfg.latent_dim, num_layers=1) # 1 layer
+        # self._value_mixer = layers.QMIXNe2(self.num_nodes, self.cfg.latent_dim, num_layers=1) # 1 layer
 
         # init values
         self.apply(tdmpc_utils.orthogonal_init)
@@ -524,6 +546,7 @@ class FacTOLD(WorldModel):
         if return_individual:
             return reward_nodes
         else:
+            # reward_nodes = torch.cat([reward_nodes, global_z.unsqueeze(-1)], dim=-2)
             total_reward = self._reward_mixer(reward_nodes.squeeze(-1))
             # total_reward = self._reward_mixer(reward_nodes.squeeze(-1), global_z)
             return total_reward
@@ -546,6 +569,8 @@ class FacTOLD(WorldModel):
         if return_individual:
             out = value_nodes
         else:
+            # squeeze(-1) only works in num_bins = 0/1
+            # value_nodes = torch.cat([value_nodes, global_z.unsqueeze(0).repeat(self.cfg.num_q, 1, 1, 1).unsqueeze(-1)], dim=-2)
             out = self._value_mixer(value_nodes.squeeze(-1))
             # out = self._value_mixer(value_nodes.squeeze(-1), global_z)
 
@@ -557,46 +582,3 @@ class FacTOLD(WorldModel):
         if return_type == "min":
             return Q.min(0).values
         return Q.sum(0) / 2
-
-
-class MixNet(nn.Module):
-    """
-    Inspired from QMIX
-    """
-    def __init__(self,
-                num_agents,
-                state_shape,
-                mixing_hidden_size=64):
-
-        super(MixNet, self).__init__()
-
-        self.num_agents = num_agents
-        self.state_shape = state_shape
-        self.mixing_hidden_size = mixing_hidden_size
-
-        # Used to generate mixing network
-        self.hyper_net1 = nn.Linear(self.state_shape, self.num_agents * self.mixing_hidden_size)
-        self.hyper_net2 = nn.Linear(self.state_shape, self.mixing_hidden_size)
-
-    def forward(self, agent_qs, global_state):
-        """
-        The forward model takes the state to be given to the hyper-networks
-        and agent observations as a single tensor (concatenation of
-        agent local current observation, one-hot encoded last action, one-hot encoded agent_id)
-        :param global_state: state_shape
-        :param agent_obs: num_agents x agent_shape
-        :return: qtot
-        """
-        # Weights for the Mixing Network (absolute for monotonicity)
-        w1 = self.hyper_net1(global_state).abs()
-        w2 = self.hyper_net2(global_state).abs()
-
-        # Reshape for Mixing Network
-        state_shape = global_state.shape
-        w1 = w1.view(*state_shape[:-1], self.num_agents, self.mixing_hidden_size)
-        w2 = w2.view(*state_shape[:-1], self.mixing_hidden_size, 1)
-
-        # Calculate mixing of agent values for q_tot
-        q_tot = nn.functional.elu(torch.matmul(agent_qs.unsqueeze(-2), w1))
-        q_tot = nn.functional.elu(torch.matmul(q_tot, w2)).squeeze(-2)
-        return q_tot
