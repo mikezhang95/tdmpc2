@@ -38,7 +38,7 @@ num_elites: 64
 num_pi_trajs: 24
 horizon: 3 # 5
 min_std: 0.05
-max_std: 0.05 # 2.0
+max_std: 2.0
 temperature: 0.5
 
 # actor
@@ -64,7 +64,7 @@ dropout: 0.01
 simnorm_dim: 8
 
 # logging
-wandb_project: tdmpc-new
+wandb_project: tdmpc-direct
 wandb_entity: mikezhang95
 wandb_silent: false
 enable_wandb: true
@@ -90,14 +90,6 @@ seed_steps: ???
 bin_size: ???
 
 # speedups
-compile: False
+compile: false
 
-# distill models
-fac_model: true
-fac_reward_coef: 0.0
-fac_value_coef: 0.1
-fac_consistency_coef: 0.0
-fac_lr: 1e-4
-fac_rho: 1.0
-num_noises: 10
-std_noises: 0.2
+fac_model: false
