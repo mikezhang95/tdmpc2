@@ -319,23 +319,28 @@ class VectorizedLinearLayer(nn.Module):
             requires_grad=True,
         )
 
+        # M: init
         for member_id in range(population_size):
-            torch.nn.init.kaiming_uniform_(self.weight[member_id], a=math.sqrt(5))
-        fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(self.weight[0])
-        bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-        torch.nn.init.uniform_(self.bias, -bound, bound)
+            torch.nn.init.orthogonal_(self.weight[member_id].data)
+        torch.nn.init.zeros_(self.bias)
+        # for member_id in range(population_size):
+        #     torch.nn.init.kaiming_uniform_(self.weight[member_id], a=math.sqrt(5))
+        # fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(self.weight[0])
+        # bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+        # torch.nn.init.uniform_(self.bias, -bound, bound)
 
+        # layernorm
         self._layer_norm = (
-            torch.nn.LayerNorm(self._out_features, self._population_size)
+            torch.nn.LayerNorm(self._out_features)
             if use_layer_norm
             else None
         )
 
-        # M: add activation and dropout
+        # M: activation and dropout
         self._act = act
         self._dropout = nn.Dropout(dropout, inplace=False) if dropout else None
 
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -355,9 +360,12 @@ class VectorizedLinearLayer(nn.Module):
             return x
     
     def __repr__(self):
-        repr_dropout = f", dropout={self._dropout.p}" if self._dropout else ", dropout=None"
+        repr_dropout = f"dropout={self._dropout.p}" if self._dropout else "dropout=None"
+        repr_ln = f"ln={self._layer_norm.__class__.__name__}" if self._layer_norm else "ln=None"
         repr_act = f"act={self._act.__class__.__name__})" if self._act else "act=None)"
-        return f"VectorizedLinearLayer(in_features={self._in_features}, "\
+        return f"VectorizedLinearLayer(population_size={self._population_size}, in_features={self._in_features}, "\
             f"out_features={self._out_features}, "\
-            f"bias={self.bias is not None}{repr_dropout}, "\
+            f"bias={self.bias is not None}, "\
+            f"{repr_dropout}, "\
+            f"{repr_ln}, "\
             f"{repr_act}"
