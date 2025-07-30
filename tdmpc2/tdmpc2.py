@@ -12,6 +12,7 @@ import time
 from functools import wraps
 
 from common.world_model import TOLD, FacTOLD
+from common.world_model import FacTOLDAttn
 
 def benchmark_torch_function(func):
     """
@@ -58,12 +59,15 @@ class TDMPC2(torch.nn.Module):
         self.cfg = cfg
         self.device = torch.device('cuda:0')
         self.model = TOLD(cfg).to(self.device) # TDMPC
+        # self.model = FacTOLD(cfg).to(self.device) # TDMPC-Fac
+        # self.model = FacTOLDAttn(cfg).to(self.device) # TDMPC-Attention
         self.optim = torch.optim.Adam([
             {'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
             {'params': self.model._dynamics.parameters()},
             {'params': self.model._reward.parameters()},
             {'params': self.model._Qs.parameters()},
-            {'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
+            {'params': self.model._task_emb.parameters() if self.cfg.multitask else []},
+            {'params': self.model._shared_attention.parameters() if hasattr(self.model, "_shared_attention") else []}
             ], lr=self.cfg.lr, capturable=True)
 
         if self.cfg.fac_model:

@@ -439,7 +439,7 @@ class TOLD(WorldModel):
 
         self._dynamics = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, cfg.latent_dim)
         self._reward = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, 1)
-        self._Qs = layers.Ensemble([tdmpc_utils.q(cfg) for _ in range(cfg.num_q)])
+        self._Qs = layers.Ensemble([tdmpc_utils.q(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, 1) for _ in range(cfg.num_q)])
 
         self.apply(tdmpc_utils.orthogonal_init)
         init.zero_([self._reward[-1].weight, self._Qs.params["5", "weight"]])
@@ -464,7 +464,7 @@ class FacTOLD(WorldModel):
         nn.Module.__init__(self)
 
         # M: action/latent dimensions
-        self.num_nodes = 1 # cfg.action_dim # number of agents
+        self.num_nodes = cfg.action_dim # number of agents
         self.action_dim_node = cfg.action_dim // self.num_nodes
         self.latent_dim_node = cfg.latent_dim // self.num_nodes
         cfg.latent_dim = self.latent_dim_node * self.num_nodes
@@ -475,7 +475,7 @@ class FacTOLD(WorldModel):
 
         # self._dynamics = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, cfg.latent_dim)
         # self._reward = tdmpc_utils.mlp(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, 1)
-        # self._Qs = layers.Ensemble([tdmpc_utils.q(cfg) for _ in range(cfg.num_q)])
+        # self._Qs = layers.Ensemble([tdmpc_utils.q(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim, 1) for _ in range(cfg.num_q)])
         self._dynamics = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], self.latent_dim_node) 
         self._reward = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1))
         self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
@@ -545,6 +545,124 @@ class FacTOLD(WorldModel):
 
         # M: generate qvalues
         node_features = self._generate_node_features(z, a)
+        value_nodes = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
+        
+        # VDN style 
+        out = torch.mean(value_nodes, dim=-2)
+
+        if return_type == 'all':
+            return out
+
+        qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
+        Q = math.two_hot_inv(out[qidx], self.cfg)
+        if return_type == "min":
+            return Q.min(0).values
+        return Q.sum(0) / 2
+
+class FacTOLDAttn(WorldModel):
+    """
+    Factored TD-MPC2 implicit world model architecture.
+    Can be used for both single-task and multi-task experiments.
+    """
+
+    def __init__(self, cfg):
+
+        nn.Module.__init__(self)
+
+        # M: action/latent dimensions
+        self.num_nodes = cfg.action_dim # number of agents
+        self.action_dim_node = cfg.action_dim // self.num_nodes
+        self.latent_dim_node = cfg.latent_dim 
+        cfg.latent_dim = self.latent_dim_node * self.num_nodes
+        self.cfg = cfg
+
+        self._encoder = tdmpc_utils.enc(cfg)
+        self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
+
+        # Shared 2-layer attention network
+        embed_dim = cfg.mlp_dim // self.num_nodes
+        self._shared_attention = tdmpc_utils.SharedAttention(
+            input_dim=self.latent_dim_node+self.action_dim_node,
+            embed_dim=embed_dim,
+            num_nodes=self.num_nodes,
+            num_heads=1,
+            num_layers=2,
+            shared_parameters = False
+        )
+
+        # Shared output heads
+        shared_parameters = False # True
+        self._dynamics = tdmpc_utils.FacMLP(self.num_nodes, embed_dim, 2*[cfg.mlp_dim // self.num_nodes], self.latent_dim_node, shared_parameters=shared_parameters) 
+        self._reward = tdmpc_utils.FacMLP(self.num_nodes, embed_dim, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), shared_parameters=shared_parameters)
+        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_nodes, embed_dim, 2*[cfg.mlp_dim // self.num_nodes], max(cfg.num_bins, 1), is_q=True, shared_parameters=shared_parameters) for _ in range(cfg.num_q)])
+
+        self.apply(tdmpc_utils.orthogonal_init)
+        # init.zero_([self._reward.node_update[-1].weight, self._Qs.params["node_update", "2", "weight"]])
+        # init.zero_([self._reward.node_update[-1].bias, self._Qs.params["node_update", "2", "bias"]])
+
+        self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
+        self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
+        self.init() # target Q
+
+    def encode(self, obs, task):
+        return self._encoder(obs)
+
+    def _generate_node_features(self, z, a):
+        """
+        Concat state and action for nodes
+        """
+        latent_node = torch.reshape(z, (*z.shape[:-1], self.num_nodes, self.latent_dim_node))
+        action_node = torch.reshape(a, (*a.shape[:-1], self.num_nodes, self.action_dim_node))
+        node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_nodes, node_dim]
+        return node_features
+
+    def next(self, z, a, task, return_individual=False):
+        """
+        Predicts the next latent state given the current latent state and action.
+        Args:
+            - z: [*, hidden_dim] * might be 1 or 2 dims
+            - a: [*, action_dim] 
+        """
+        node_features = self._generate_node_features(z, a)
+        node_features = self._shared_attention(node_features)
+        x = self._dynamics(node_features) # [*, num_agents, hidden_dim_node]
+        x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim_node * num_agents]
+        return x
+
+    def reward(self, z, a, task, return_individual=False, global_z=None):
+        """
+        Predicts instantaneous (single-step) reward.
+        """
+        node_features = self._generate_node_features(z, a)
+        # TODO: resue attention outputs
+        node_features = self._shared_attention(node_features)
+        reward_nodes = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
+
+        # VDN style 
+        total_reward = torch.mean(reward_nodes, dim=-2)
+        return total_reward
+
+
+    def Q(self, z, a, task, return_type='min', target=False, detach=False):
+        """
+        Predict state-action value.
+        `return_type` can be one of [`min`, `avg`, `all`]:
+            - `min`: return the minimum of two randomly subsampled Q-values.
+            - `avg`: return the average of two randomly subsampled Q-values.
+            - `all`: return all Q-values.
+        `target` specifies whether to use the target Q-networks or not.
+        """
+        assert return_type in {'min', 'avg', 'all'}
+        if target:
+            qnet = self._target_Qs
+        elif detach:
+            qnet = self._detach_Qs
+        else:
+            qnet = self._Qs
+
+        # M: generate qvalues
+        node_features = self._generate_node_features(z, a)
+        node_features = self._shared_attention(node_features)
         value_nodes = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
         
         # VDN style 

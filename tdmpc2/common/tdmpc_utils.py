@@ -111,11 +111,11 @@ def mlp(in_dim, mlp_dim, out_dim, act_fn=nn.ELU()):
 		nn.Linear(mlp_dim[0], mlp_dim[1]), act_fn,
 		nn.Linear(mlp_dim[1], out_dim))
 
-def q(cfg, act_fn=nn.ELU()):
+def q(in_dim, mlp_dim, out_dim):
 	"""Returns a Q-function that uses Layer Normalization."""
-	return nn.Sequential(nn.Linear(cfg.latent_dim+cfg.action_dim, cfg.mlp_dim), nn.LayerNorm(cfg.mlp_dim), nn.Tanh(),
-						 nn.Linear(cfg.mlp_dim, cfg.mlp_dim), nn.ELU(),
-						 nn.Linear(cfg.mlp_dim, 1))
+	return nn.Sequential(nn.Linear(in_dim, mlp_dim), nn.LayerNorm(mlp_dim), nn.Tanh(),
+						 nn.Linear(mlp_dim, mlp_dim), nn.ELU(),
+						 nn.Linear(mlp_dim, out_dim))
 
 
 class RandomShiftsAug(nn.Module):
@@ -245,18 +245,22 @@ class FacMLP(nn.Module):
     FullyConnectedGraph layer with LayerNorm, activation, and optionally dropout.
     M: currently doesn't need aggregate function in GNN, only use this structure to easily calculate node/edge features
     """
-    def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0., is_q=False):
+    def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0., is_q=False, shared_parameters=False):
         super(FacMLP, self).__init__()
         self.num_nodes = num_nodes
 
         # Define custom MLPs or other functions for node and edge updates
         # M: can be extended to non-shared networks, then use for-loop should run fast
-        self.shared_parameters = False # True
+        self.shared_parameters = shared_parameters
         if self.shared_parameters:
-            self.node_update = mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
+            if is_q:
+                self.node_update = q(node_in_dim, mlp_dims[0], node_out_dim)
+            else:
+                self.node_update = mlp(node_in_dim, mlp_dims, node_out_dim)
         else:
-            # naive implementation
+            # M: naive implementation
             # self.node_update = nn.ModuleList([mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_nodes)])
+            # M: vectorize implementation
             node_dims = [node_in_dim] + mlp_dims + [node_out_dim]
             self.node_update = []
             for i in range(len(node_dims)-1):
@@ -282,12 +286,8 @@ class FacMLP(nn.Module):
         node_features = node_features.view(-1, raw_input_shape[-2], raw_input_shape[-1]).contiguous() # [B, num_nodes, input_dim]
 
         # Update node outputs
-        if self.shared_parameters:
-            node_outputs = self.node_update(node_features)
-        else:
-            node_outputs = node_features.transpose(1, 0) # [num_nodes, B, input_dim]
-            node_outputs = self.node_update(node_outputs) # [num_nodes, B, node_dim]
-            node_outputs = node_outputs.transpose(1, 0) # [B, num_nodes, node_dim]
+        node_outputs = self.node_update(node_features)
+
         # Reshape outputs back to 4D/3D vectors
         node_outputs = node_outputs.view(*raw_input_shape[:-2], self.num_nodes, -1).contiguous() # [..., num_nodes, node_dim]
         return node_outputs
@@ -345,10 +345,11 @@ class VectorizedLinearLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            - x: [population_size, batch_size, in_features]
+            - x: [batch_size, population, in_features]
         Returns:
-            - x: [population_size, batch_size, out_features]
+            - x: [batch_size, population, out_features]
         """
+        x = x.transpose(0, 1)
         assert x.shape[0] == self._population_size
         x = x.matmul(self.weight) + self.bias
         if self._layer_norm is not None:
@@ -356,9 +357,9 @@ class VectorizedLinearLayer(nn.Module):
         if self._dropout:
             x = self._dropout(x)
         if self._act:
-            return self._act(x)
-        else: 
-            return x
+            x = self._act(x)
+        x = x.transpose(0, 1)
+        return x
     
     def __repr__(self):
         repr_dropout = f"dropout={self._dropout.p}" if self._dropout else "dropout=None"
@@ -370,3 +371,79 @@ class VectorizedLinearLayer(nn.Module):
             f"{repr_dropout}, "\
             f"{repr_ln}, "\
             f"{repr_act}"
+
+
+class SharedAttention(nn.Module):
+    def __init__(self, input_dim, embed_dim, num_nodes=6, num_heads=2, num_layers=2, shared_parameters=True):
+        super().__init__()
+        self.index_embedding = nn.Embedding(num_nodes, embed_dim)
+        if shared_parameters:
+            self.input_proj = nn.Linear(input_dim, embed_dim)
+            encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, batch_first=True)
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+            self.output_proj = nn.Linear(embed_dim, embed_dim)
+        else:
+            self.input_proj = VectorizedLinearLayer(num_nodes, input_dim, embed_dim)
+            self.encoder = nn.Sequential(*[HeteAttentionLayer(num_nodes, embed_dim) for i in range(num_layers)])
+            self.output_proj = VectorizedLinearLayer(num_nodes, embed_dim, embed_dim)
+        
+        self._input_dim = input_dim 
+        self._embed_dim = embed_dim
+        self._num_nodes = num_nodes
+        self._num_heads = num_heads
+        self._num_layers = num_layers
+
+    def forward(self, x):
+        """
+        Args:
+            - x: [..., num_nodes, feature_dim]
+        Returns:
+            - x: [..., num_nodes, embed_dim]
+        """
+        # reshape to 3-D tensors
+        raw_input_shape = x.shape # [..., num_nodes, input_dim]
+        x = x.view(-1, raw_input_shape[-2], raw_input_shape[-1]).contiguous() # [B, num_nodes, input_dim]
+
+        # proj input 
+        x = self.input_proj(x)
+        idx = torch.arange(raw_input_shape[-2], device=x.device)
+        index_embed = self.index_embedding(idx)  # [N, E]
+        x = x + index_embed.unsqueeze(0)         # broadcast to [B, N, E]
+        # encode with transformer
+        x = self.encoder(x)
+        # proj output 
+        x = self.output_proj(x)
+
+        # shape back to tensors
+        x = x.view(*raw_input_shape[:-2], raw_input_shape[-2], -1).contiguous() # [..., num_nodes, node_dim]
+        return x
+
+
+    def __repr__(self):
+        return f"SharedAttention(input_dim={self._input_dim}, embed_dim={self._embed_dim}, "\
+                f"num_nodes={self._num_nodes}, num_heads={self._num_heads}, num_layers={self._num_layers})"
+
+
+class HeteAttentionLayer(nn.Module):
+    def __init__(self, num_agents, embed_dim):
+        super(HeteAttentionLayer, self).__init__()
+        self.emb_dim = embed_dim
+
+        # Linear layers for query, key, and value transformations
+        self.query_proj = VectorizedLinearLayer(num_agents, embed_dim, embed_dim)
+        self.key_proj = VectorizedLinearLayer(num_agents, embed_dim, embed_dim)
+        self.value_proj = VectorizedLinearLayer(num_agents, embed_dim, embed_dim)
+
+    def forward(self, x):
+        # Project q,k,v
+        Q = self.query_proj(x)  # [B, num_actions, 64]
+        K = self.key_proj(x)      # [B, num_actions, 64]
+        V = self.value_proj(x)  # [B, num_actions, 64]
+
+        # Compute scaled dot-product attention
+        attn_scores = torch.matmul(Q, K.transpose(-2,-1)) / (self.emb_dim ** 0.5)
+
+        attn_weights = nn.functional.softmax(attn_scores, dim=-1)   # [B, 21, 21]
+        attn_output = torch.matmul(attn_weights, V)                 # [B, num_actions, 64]
+
+        return attn_output
