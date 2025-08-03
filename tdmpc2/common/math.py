@@ -97,3 +97,24 @@ def gumbel_softmax_sample(p, temperature=1.0, dim=0):
     gumbels = (logits + gumbels) / temperature  # ~Gumbel(logits,tau)
     y_soft = gumbels.softmax(dim)
     return y_soft.argmax(-1)
+
+def softmax_distillation_loss(q_student: torch.Tensor, q_teacher: torch.Tensor, temperature: float = 1.0):
+    """
+    Args:
+        q_student: [B, A] tensor Q-values predicted by student.
+        q_teacher: [B, A] tensor Q-values predicted by teacher.
+        temperature: float temperature for softening the distributions.
+    Returns:
+        loss: scalar listwise distillation loss.
+    """
+    # Soften Q-values
+    q_t = q_teacher / temperature
+    q_s = q_student / temperature
+
+    # Convert to log probabilities
+    log_probs_student = F.log_softmax(q_s, dim=-1)        # [B, A]
+    probs_teacher = F.softmax(q_t, dim=-1).detach()       # [B, A], stop gradient from teacher
+
+    # KL divergence per sample
+    loss = F.kl_div(log_probs_student, probs_teacher, reduction='batchmean')
+    return loss

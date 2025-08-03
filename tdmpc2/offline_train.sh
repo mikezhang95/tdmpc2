@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -p alldlc_gpu-rtx2080 # partition (queue)
-#SBATCH --mem 50000 # memory pool for each core (50GB)
+#SBATCH --mem 10000 # memory pool for each core (50GB)
 #SBATCH -t 1-00:00 # time (D-HH:MM)
-#SBATCH -c 20 # number of cores
+#SBATCH -c 10 # number of cores
 #SBATCH -o log/%x.%A.%a.out # STDOUT  (the folder log has to be created prior to running or this won't work)
 #SBATCH -e log/%x.%A.%a.err # STDERR  (the folder log has to be created prior to running or this won't work)
 #SBATCH -J tdmpc2 # sets the job name. If not specified, the file name will be used as job name
@@ -18,9 +18,25 @@ echo "Seed $seed"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
-python -u train.py  task=walker-run \
-                    exp_name=offline-fac \
+# # 1. online training, get expert model and replay buffer
+# python -u train.py task=walker-run \
+#                 exp_name=online-fac \
+#                 num_envs=4 \
+#                 steps_per_update=4 \
+#                 compile=True
+
+
+
+# 2. imitation learning, train fac model
+num_agents=6
+exp_name=il-fac_N${num_agents}
+
+python -u train.py  --config-path=./configs --config-name=il_fac \
+                    task=walker-run \
+                    num_agents=${num_agents} \
+                    exp_name=${exp_name} \
+                    data_dir=${PWD}/logs/walker-run/1/online-tdmpc/buffer.pt \
+                    checkpoint=${PWD}/logs/walker-run/1/online-tdmpc/models/final.pt \
                     steps=500000 \
-                    data_dir=/home/yzhang/tdmpc2/tdmpc2/logs/walker-run/1/baseline/buffer.pt \
-                    compile=True 
+                    compile=True \
 

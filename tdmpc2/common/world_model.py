@@ -460,58 +460,52 @@ class FacTOLD(WorldModel):
         nn.Module.__init__(self)
 
         # MC: action/latent dimensions
-        # M: seperate action/state space for each action dimension
-        self.num_nodes = cfg.action_dim # number of agents
-        self.action_dim_node = 1
-        self.latent_dim_node = cfg.latent_dim  # TODO: // 5
+        self.num_agents = cfg.num_agents # number of agents
+        self.action_dim_node = cfg.action_dim // self.num_agents
+        self.latent_dim_node = cfg.latent_dim
         self.cfg = cfg
 
-        # factored modules
-        # MC: fac encoders
-        # obs_dim = cfg.latent_dim 
-        # self._encoder = tdmpc_utils.FacMLP(self.num_nodes, obs_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim_node)  # 26/60 -> 256 -> 60
-        self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.mlp_dim, self.latent_dim_node * self.num_nodes)
+        # modules
+        # Baseline: encode from z or obs
+        self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.enc_dim, self.latent_dim_node*self.num_agents)
+        # self._encoder = tdmpc_utils.mlp(cfg.obs_shape['state'][0], cfg.enc_dim, self.latent_dim_node*self.num_agents)
 
-        self._dynamics = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], self.latent_dim_node) 
-        self._reward = tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1))
-        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_nodes, self.latent_dim_node + self.action_dim_node, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
+        self._dynamics = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_node+self.action_dim_node, 2*[cfg.mlp_dim//self.num_agents], self.latent_dim_node) 
+        self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_node+self.action_dim_node, 2*[cfg.mlp_dim//self.num_agents], max(cfg.num_bins, 1))
+        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_node+self.action_dim_node, 2*[cfg.mlp_dim//self.num_agents], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
 
         # MC: mixing network
         # === LMN ===
-        self._reward_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
-        self._value_mixer = lmn.MonotonicLayer(self.num_nodes, 1)
-        # self._reward_mixer = lmn.MonotonicLayer(self.num_nodes + cfg.latent_dim, 1, monotonic_constraints=[1]*self.num_nodes+[0]*cfg.latent_dim)
-        # self._value_mixer = lmn.MonotonicLayer(self.num_nodes + cfg.latent_dim, 1, monotonic_constraints=[1]*self.num_nodes+[0]*cfg.latent_dim)
+        self._reward_mixer = lmn.MonotonicLayer(self.num_agents, 1)
+        self._value_mixer = lmn.MonotonicLayer(self.num_agents, 1)
         # lip_nn = nn.Sequential(
-        #     lmn.LipschitzLinear(self.num_nodes, 32, kind="one-inf"),
+        #     lmn.LipschitzLinear(self.num_agents, 32, kind="one-inf"),
         #     lmn.GroupSort(2),
         #     lmn.LipschitzLinear(32, 1, kind="inf"),
         # )
-        # self._value_mixer = lmn.MonotonicWrapper(lip_nn, monotonic_constraints=[1]*self.num_nodes) # 2 layer
+        # self._value_mixer = lmn.MonotonicWrapper(lip_nn) # 2 layer
 
         # === VDN ===
-        # self._reward_mixer = nn.AvgPool1d(self.num_nodes)
-        # self._value_mixer = nn.AvgPool1d(self.num_nodes)
+        # self._reward_mixer = nn.AvgPool1d(self.num_agents)
+        # self._value_mixer = nn.AvgPool1d(self.num_agents)
 
         # === QMIX ===
-        # self._reward_mixer = layers.QMIXNet(self.num_nodes, self.cfg.latent_dim) # 2 layer
-        # self._value_mixer = layers.QMIXNet(self.num_nodes, self.cfg.latent_dim) # 2 layer
-        # self._reward_mixer = layers.QMIXNet2self.num_nodes, self.cfg.latent_dim, num_layers=1) # 1 layer
-        # self._value_mixer = layers.QMIXNe2(self.num_nodes, self.cfg.latent_dim, num_layers=1) # 1 layer
+        # self._reward_mixer = layers.QMIXNet(self.num_agents, self.cfg.latent_dim) 
+        # self._value_mixer = layers.QMIXNet(self.num_agents, self.cfg.latent_dim) 
 
         # init values
         self.apply(tdmpc_utils.orthogonal_init)
         init.zero_([self._reward.node_update[-1].weight, self._Qs.params["node_update", "2", "weight"]])
         init.zero_([self._reward.node_update[-1].bias, self._Qs.params["node_update", "2", "bias"]])
-        # self.init() # target Q
+
  
     def _generate_node_features(self, z, a):
         """
         Concat state and action for nodes
         """
-        latent_node = torch.reshape(z, (*z.shape[:-1], self.num_nodes, self.latent_dim_node))
-        action_node = torch.reshape(a, (*a.shape[:-1], self.num_nodes, self.action_dim_node))
-        node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_nodes, node_dim]
+        latent_node = torch.reshape(z, (*z.shape[:-1], self.num_agents, self.latent_dim_node))
+        action_node = torch.reshape(a, (*a.shape[:-1], self.num_agents, self.action_dim_node))
+        node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_agents, node_dim]
         return node_features
 
     def encode(self, obs, task=None):
@@ -519,10 +513,6 @@ class FacTOLD(WorldModel):
         Encodes an observation into its latent representation.
         This implementation assumes a single state-based observation.
         """
-        # obs_dim = obs.shape # [..., latent_dim]
-        # node_z = obs.unsqueeze(-2).repeat(*([1]*(len(obs_dim)-1)), self.num_nodes, 1)  # [..., num_nodes, node_dim]
-        # node_z = self._encoder(node_z) # w or w/o seperate encoder
-        # return node_z.view(*obs_dim[:-1], -1).contiguous()
         return self._encoder(obs)
 
     def next(self, z, a, task, return_individual=False):
@@ -542,13 +532,12 @@ class FacTOLD(WorldModel):
         Predicts instantaneous (single-step) reward.
         """
         node_features = self._generate_node_features(z, a)
-        reward_nodes = self._reward(node_features)  # [*, num_nodes, num_bins], [*, num_edges, num_bins]
+        reward_nodes = self._reward(node_features)  # [*, num_agents, num_bins], [*, num_edges, num_bins]
         if return_individual:
             return reward_nodes
         else:
-            # reward_nodes = torch.cat([reward_nodes, global_z.unsqueeze(-1)], dim=-2)
-            total_reward = self._reward_mixer(reward_nodes.squeeze(-1))
-            # total_reward = self._reward_mixer(reward_nodes.squeeze(-1), global_z)
+            total_reward = torch.mean(reward_nodes, dim=-2)
+            # total_reward = self._reward_mixer(reward_nodes.squeeze(-1)).unsqueeze(-1)
             return total_reward
 
     def Q(self, z, a, task, return_type='min', target=False, detach=False, return_individual=False, global_z=None):
@@ -565,14 +554,12 @@ class FacTOLD(WorldModel):
 
         # M: generate qvalues
         node_features = self._generate_node_features(z, a)
-        value_nodes = qnet(node_features)  # [num_q, *, num_nodes, num_bins], [num_q, *, num_edges, num_bins]
+        value_nodes = qnet(node_features)  # [num_q, *, num_agents, num_bins], [num_q, *, num_edges, num_bins]
         if return_individual:
             out = value_nodes
         else:
-            # squeeze(-1) only works in num_bins = 0/1
-            # value_nodes = torch.cat([value_nodes, global_z.unsqueeze(0).repeat(self.cfg.num_q, 1, 1, 1).unsqueeze(-1)], dim=-2)
-            out = self._value_mixer(value_nodes.squeeze(-1))
-            # out = self._value_mixer(value_nodes.squeeze(-1), global_z)
+            out = torch.mean(value_nodes, dim=-2)
+            # out = self._value_mixer(value_nodes.squeeze(-1)).unsqueeze(-1)
 
         if return_type == 'all':
             return out
@@ -582,3 +569,13 @@ class FacTOLD(WorldModel):
         if return_type == "min":
             return Q.min(0).values
         return Q.sum(0) / 2
+
+    def __repr__(self):
+        repr = 'Factorized World Model\n'
+        modules = ['Encoder', 'Dynamics', 'Reward', 'Q-functions']
+        for i, m in enumerate([self._encoder, self._dynamics, self._reward, self._Qs]):
+            repr += f"{modules[i]}: {m}\n"
+        repr += "Learnable parameters: {:,}".format(self.total_params)
+        return repr
+
+
