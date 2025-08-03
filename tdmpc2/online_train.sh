@@ -18,8 +18,40 @@ echo "Seed $seed"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
-python -u train.py task=walker-run \
-                exp_name=online-fac \
+
+# 1. online tdmpc
+config_name=online_tdmpc
+exp_name=online-tdmpc
+
+python -u train.py --config-path=./configs --config-name=${config_name} \
+                exp_name=${exp_name} \
+                task=walker-run \
+                num_envs=4 \
+                steps_per_update=4 \
+                compile=True
+
+# 2. online fac tdmpc 
+config_name=online_fac
+exp_name=online-fac
+num_agents=6
+
+python -u train.py --config-path=./configs --config-name=${config_name} \
+                exp_name=${exp_name} \
+                num_agents=${num_agents}
+                task=walker-run \
+                num_envs=4 \
+                steps_per_update=4 \
+                enable_wandb=False \
+#                 compile=True
+
+
+# 3. online attention tdmpc 
+config_name=online_attn
+exp_name=online-attn
+
+python -u train.py --config-path=./configs --config-name=${config_name} \
+                exp_name=${exp_name} \
+                task=walker-run \
                 num_envs=4 \
                 steps_per_update=4 \
                 compile=True

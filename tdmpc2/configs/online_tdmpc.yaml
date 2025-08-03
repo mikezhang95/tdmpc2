@@ -93,5 +93,4 @@ bin_size: ???
 compile: false
 
 # model specific
-model_type: told
-
+model_type: told 

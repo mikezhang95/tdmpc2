@@ -17,7 +17,7 @@ batch_size: 512
 steps_per_update: 1
 reward_coef: 0.5
 value_coef: 0.1
-consistency_coef: 2.0
+consistency_coef: 0.2 # 2.0
 rho: 0.5
 lr: 5e-4 # 1e-3
 enc_lr_scale: 1.0
@@ -64,7 +64,7 @@ dropout: 0.01
 simnorm_dim: 8
 
 # logging
-wandb_project: tdmpc-new
+wandb_project: tdmpc-direct
 wandb_entity: mikezhang95
 wandb_silent: false
 enable_wandb: true
@@ -90,4 +90,8 @@ seed_steps: ???
 bin_size: ???
 
 # speedups
-compile: False
+compile: false
+
+# model specific
+model_type: attn_told
+
