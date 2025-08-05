@@ -81,6 +81,7 @@ class OfflineTrainer(Trainer):
 		# assert self.buffer.num_eps == expected_episodes, \
 		# 	f'Buffer has {self.buffer.num_eps} episodes, expected {expected_episodes} episodes.'
 		
+		best_episode_reward = 0.0
 		print(f'Training agent for {self.cfg.steps} iterations...')
 		for i in range(self.cfg.steps+1):
 			self._step = i
@@ -98,7 +99,13 @@ class OfflineTrainer(Trainer):
 					self.logger.log(eval_metrics, 'eval')
 					# metrics.update(self.eval())
 					# self.logger.pprint_multitask(metrics, self.cfg)
-					# if i > 0:
-						# self.logger.save_agent(self.agent, identifier=f'{i}')
+					if i > 0:
+						self.logger.save_agent(self.agent, identifier=f'{i}')
+
+					# save best model
+					if eval_metrics['episode_reward'] > best_episode_reward:
+						best_episode_reward = eval_metrics['episode_reward'] 
+						model_path = f"{self.cfg.work_dir}/models/best.pt"
+						self.agent.save(model_path)
 			
 		self.logger.finish(self.agent)

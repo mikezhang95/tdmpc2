@@ -303,7 +303,8 @@ z (torch.Tensor): Latent state from which to plan.
         pi_loss = ((self.cfg.entropy_coef * log_pis - qs).mean(dim=(1,2)) * rho).mean()
         pi_loss.backward()
         pi_grad_norm = torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm)
-        self.pi_optim.step()
+        if not self.cfg.fac_model:
+            self.pi_optim.step()
         self.pi_optim.zero_grad(set_to_none=True)
 
         return pi_loss.detach(), pi_grad_norm
@@ -369,7 +370,8 @@ z (torch.Tensor): Latent state from which to plan.
         # Update model
         total_loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip_norm)
-        self.optim.step()
+        if not self.cfg.fac_model:
+            self.optim.step()
         self.optim.zero_grad(set_to_none=True)
 
         # Update policy

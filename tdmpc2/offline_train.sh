@@ -19,8 +19,9 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
 # # 1. online training, get expert model and replay buffer
-# python -u train.py task=walker-run \
-#                 exp_name=online-fac \
+# task_name=walker-run
+# python -u train.py task=${task_name} \
+#                 exp_name=online-tdmpc \
 #                 num_envs=4 \
 #                 steps_per_update=4 \
 #                 compile=True
@@ -31,12 +32,43 @@ export CUDA_VISIBLE_DEVICES=0
 num_agents=6
 exp_name=il-fac_N${num_agents}
 
+task_name=walker-run # 6
+# task_name=fish-swim # 5
+# task_name=reacher-three-easy # 3
+# task_name=hopper-stand # 4
+# task_name=quadruped-walk # 12 num_noises=20
+
+# task_name=walker-walk # 6
+# task_name=hopper-hop # 4
+# task_name=hopper-hop-backwards # 4
+
 python -u train.py  --config-path=./configs --config-name=il_fac \
-                    task=walker-run \
+                    task=${task_name} \
                     num_agents=${num_agents} \
                     exp_name=${exp_name} \
-                    data_dir=${PWD}/logs/walker-run/1/online-tdmpc/buffer.pt \
-                    checkpoint=${PWD}/logs/walker-run/1/online-tdmpc/models/final.pt \
+                    data_dir=${PWD}/logs/${task_name}/1/online-tdmpc/buffer.pt \
+                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc/models/final.pt \
                     steps=500000 \
                     compile=True \
+		    seed=1 &
+
+python -u train.py  --config-path=./configs --config-name=il_fac \
+                    task=${task_name} \
+                    num_agents=${num_agents} \
+                    exp_name=${exp_name} \
+                    data_dir=${PWD}/logs/${task_name}/1/online-tdmpc/buffer.pt \
+                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc/models/final.pt \
+                    steps=500000 \
+                    compile=True \
+		    seed=2 &
+
+python -u train.py  --config-path=./configs --config-name=il_fac \
+                    task=${task_name} \
+                    num_agents=${num_agents} \
+                    exp_name=${exp_name} \
+                    data_dir=${PWD}/logs/${task_name}/1/online-tdmpc/buffer.pt \
+                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc/models/final.pt \
+                    steps=500000 \
+                    compile=True \
+		    seed=3 &
 

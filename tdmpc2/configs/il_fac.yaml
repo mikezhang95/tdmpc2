@@ -100,6 +100,6 @@ fac_consistency_coef: 0.0
 fac_lr: 1e-4
 fac_rho: 0.5
 num_noises: 10
-std_noises: 0.2
+std_noises: 0.5
 num_agents: 6
 
