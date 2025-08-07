@@ -2,6 +2,7 @@ import dataclasses
 import re
 from pathlib import Path
 from typing import Any
+import torch
 
 import hydra
 from omegaconf import OmegaConf
@@ -81,5 +82,11 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 	if cfg.get('compile', False):
 		assert cfg.obs == 'state', 'torch.compile only supports state observations at the moment.'
 		assert not cfg.multitask, 'torch.compile does not support multitask training at the moment.'
+    
+    # Check GPU accessiblae
+	if torch.cuda.is_available():
+		cfg.device = "cuda"
+	else:
+		cfg.device = "cpu"
 
 	return cfg_to_dataclass(cfg)

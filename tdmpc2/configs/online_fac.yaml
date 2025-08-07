@@ -91,6 +91,7 @@ bin_size: ???
 
 # speedups
 compile: False
+device: cuda
 
 # distill models
 fac_model: true

@@ -13,38 +13,6 @@ from functools import wraps
 
 from common.world_model import TOLD, FacTOLD
 
-def benchmark_torch_function(func):
-    """
-    Decorator to calculate the average running time of a PyTorch function over 10 executions.
-    """
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        execution_times = []
-        for _ in range(10):  # Run the function 10 times
-            # Create CUDA events
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-
-            # Record start event
-            start_event.record()
-
-            result = func(*args, **kwargs)
-
-            # Record end event
-            end_event.record()
-        
-            # Wait for all streams to synchronize
-            torch.cuda.synchronize()
-        
-            # Calculate elapsed time in milliseconds
-            elapsed_time_ms = start_event.elapsed_time(end_event)
-            execution_times.append(elapsed_time_ms)
-        
-        avg_time = sum(execution_times) / len(execution_times)
-        print(f"Function '{func.__name__}' took an average of {avg_time:.6f} ms over 10 runs.")
-        return result
-    
-    return wrapper
 
 class TDMPC2(torch.nn.Module):
     """
@@ -56,7 +24,7 @@ class TDMPC2(torch.nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.device = torch.device('cuda:0')
+        self.device= torch.device(cfg.device)
         self.model = TOLD(cfg).to(self.device) # TDMPC
         self.optim = torch.optim.Adam([
             {'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
@@ -83,7 +51,7 @@ class TDMPC2(torch.nn.Module):
         self.scale = RunningScale(cfg)
         self.cfg.iterations += 2*int(cfg.action_dim >= 20) # Heuristic for large action spaces
         self.discount = torch.tensor(
-            [self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device='cuda:0'
+            [self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device=self.device
         ) if self.cfg.multitask else self._get_discount(cfg.episode_length)
         self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.num_envs, self.cfg.horizon, self.cfg.action_dim, device=self.device))
         if cfg.compile:
@@ -136,7 +104,7 @@ class TDMPC2(torch.nn.Module):
         Args:
             fp (str or dict): Filepath or state dict to load.
         """
-        state_dict = fp if isinstance(fp, dict) else torch.load(fp)
+        state_dict = fp if isinstance(fp, dict) else torch.load(fp, map_location=self.device)
         self.model.load_state_dict(state_dict["model"])
         if self.cfg.fac_model and "fac_model" in state_dict:
             self.fac_model.load_state_dict(state_dict["fac_model"])

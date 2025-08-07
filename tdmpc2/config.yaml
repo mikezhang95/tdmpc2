@@ -91,3 +91,4 @@ bin_size: ???
 
 # speedups
 compile: False
+device: cuda
