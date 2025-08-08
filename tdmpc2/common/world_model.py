@@ -586,7 +586,7 @@ class AttnTOLD(FacTOLD):
         self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
 
         # Shared output heads
-        shared_parameters = True
+        shared_parameters = False # True
         input_dim = self.latent_dim_node+self.action_dim_node
         self._dynamics = tdmpc_utils.AttnMLP(self.num_agents, input_dim, 2*[cfg.mlp_dim // self.num_agents], self.latent_dim_node, shared_parameters=shared_parameters) 
         self._reward = tdmpc_utils.AttnMLP(self.num_agents, input_dim, 2*[cfg.mlp_dim // self.num_agents], max(cfg.num_bins, 1), shared_parameters=shared_parameters)

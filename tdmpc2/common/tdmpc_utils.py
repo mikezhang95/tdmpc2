@@ -390,7 +390,7 @@ class AttentionEncoder(nn.Module):
         return x
 
     def __repr__(self):
-        return f"SharedAttention(input_dim={self._input_dim}, embed_dim={self._embed_dim}, "\
+        return f"AttentionEncoder(input_dim={self._input_dim}, embed_dim={self._embed_dim}, "\
                 f"num_nodes={self._num_nodes}, num_heads={self._num_heads}, num_layers={self._num_layers})"
 
 
