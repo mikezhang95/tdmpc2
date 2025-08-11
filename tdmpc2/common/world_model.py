@@ -461,18 +461,18 @@ class FacTOLD(WorldModel):
 
         # MC: action/latent dimensions
         self.num_agents = cfg.num_agents # number of agents
-        self.action_dim_node = cfg.action_dim // self.num_agents
-        self.latent_dim_node = cfg.latent_dim
+        self.action_dim_agent = cfg.action_dim // self.num_agents
+        self.latent_dim_agent = cfg.latent_dim
         self.cfg = cfg
 
         # modules
         # Baseline: encode from z or obs
-        self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.enc_dim, self.latent_dim_node*self.num_agents)
-        # self._encoder = tdmpc_utils.mlp(cfg.obs_shape['state'][0], cfg.enc_dim, self.latent_dim_node*self.num_agents)
+        self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.enc_dim, self.latent_dim_agent*self.num_agents)
+        # self._encoder = tdmpc_utils.mlp(cfg.obs_shape['state'][0], cfg.enc_dim, self.latent_dim_agent*self.num_agents)
 
-        self._dynamics = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_node+self.action_dim_node, 2*[cfg.mlp_dim//self.num_agents], self.latent_dim_node) 
-        self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_node+self.action_dim_node, 2*[cfg.mlp_dim//self.num_agents], max(cfg.num_bins, 1))
-        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_node+self.action_dim_node, 2*[cfg.mlp_dim//self.num_agents], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
+        self._dynamics = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], self.latent_dim_agent) 
+        self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], max(cfg.num_bins, 1))
+        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
 
         # MC: mixing network
         # === LMN ===
@@ -503,8 +503,8 @@ class FacTOLD(WorldModel):
         """
         Concat state and action for nodes
         """
-        latent_node = torch.reshape(z, (*z.shape[:-1], self.num_agents, self.latent_dim_node))
-        action_node = torch.reshape(a, (*a.shape[:-1], self.num_agents, self.action_dim_node))
+        latent_node = torch.reshape(z, (*z.shape[:-1], self.num_agents, self.latent_dim_agent))
+        action_node = torch.reshape(a, (*a.shape[:-1], self.num_agents, self.action_dim_agent))
         node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_agents, node_dim]
         return node_features
 
@@ -523,8 +523,8 @@ class FacTOLD(WorldModel):
             - a: [*, action_dim] 
         """
         node_features = self._generate_node_features(z, a)
-        x = self._dynamics(node_features) # [*, num_agents, hidden_dim_node]
-        x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim_node * num_agents]
+        x = self._dynamics(node_features) # [*, num_agents, hidden_dim_agent]
+        x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim_agent * num_agents]
         return x
 
     def reward(self, z, a, task, return_individual=False, global_z=None):

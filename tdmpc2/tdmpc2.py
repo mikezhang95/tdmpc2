@@ -41,8 +41,8 @@ class TDMPC2(torch.nn.Module):
                 {'params': self.fac_model._dynamics.parameters()},
                 {'params': self.fac_model._reward.parameters()},
                 {'params': self.fac_model._Qs.parameters()},
-                {'params': self.fac_model._reward_mixer.parameters()},
-                {'params': self.fac_model._value_mixer.parameters()},
+                {'params': self.fac_model._reward_mixer.parameters() if hasattr(self.fac_model, '_reward_mixer') else []},
+                {'params': self.fac_model._value_mixer.parameters() if hasattr(self.fac_model, '_value_mixer') else []},
                 ], lr=self.cfg.fac_lr, capturable=True)
             print(self.fac_model)
 
@@ -206,39 +206,54 @@ z (torch.Tensor): Latent state from which to plan.
             if self.cfg.multitask:
                 actions = actions * self.model._action_masks[task]
 
-            # Compute elite actions
-            if eval_mode and self.cfg.fac_model: # decentralized version
+            # TODO: this 2 branches can be combined
+            # M: factorized version
+            if self.cfg.fac_model: # decentralized version
+
+                # Compute elite actions
                 fac_z = self.fac_model.encode(z, task)
-                value = self._estimate_individual_value(fac_z, actions, task).nan_to_num(0).squeeze(-1) # [E, N, A]
-                elite_idxs = torch.topk(value, self.cfg.num_elites, dim=1).indices # [E, EL, A]
-                elite_value = torch.gather(value, 1, elite_idxs) # [E, EL, A]
-                elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).expand(-1, self.cfg.horizon, -1, -1)) # [E, H, EL, A]
-            else:  # centralized version
+                value = self._estimate_individual_value(fac_z, actions, task).nan_to_num(0).squeeze(-1) # [E, N, AN]
+                elite_idxs = torch.topk(value, self.cfg.num_elites, dim=1).indices # [E, EL, NA]
+                elite_value = torch.gather(value, 1, elite_idxs) # [E, EL, NA]
+                reshaped_actions = actions.view(self.cfg.num_envs, self.cfg.horizon, self.cfg.num_samples, self.cfg.num_agents, self.fac_model.action_dim_agent) # [E, H, N, NA, AN] 
+                elite_actions = torch.gather(reshaped_actions, 2, elite_idxs.unsqueeze(1).unsqueeze(4).expand(-1, self.cfg.horizon, -1, -1, self.fac_model.action_dim_agent)) # [E, H, EL, NA, AN]
+
+                # Update parameters
+                max_value = elite_value.max(1).values # [E, NA]
+                score = torch.exp(self.cfg.temperature*(elite_value - max_value.unsqueeze(1))) # [E, EL, NA]
+                score = (score / score.sum(1, keepdim=True)) # [E, EL, NA]
+                extend_score = score.unsqueeze(1).unsqueeze(4) # [E, 1, EL, NA, 1]
+                mean = (extend_score * elite_actions).sum(2) / (extend_score.sum(2) + 1e-9) # [E, H, NA, AN]
+                std = ((extend_score * (elite_actions - mean.unsqueeze(2)) ** 2).sum(2) / (extend_score.sum(2) + 1e-9)).sqrt() # [E, H, NA, AN]
+                mean = mean.view(self.cfg.num_envs, self.cfg.horizon, -1) # [E, H, A]
+                std = std.view(self.cfg.num_envs, self.cfg.horizon, -1) # [E, H, A]
+                std = std.clamp(self.cfg.min_std, self.cfg.max_std)
+
+            # M: centralized version
+            else:  
+                # Compute elite actions
                 value = self._estimate_value(z, actions, task).nan_to_num(0) # [E, N, 1] 
-                # fac_z = self.fac_model.encode(z, task)
-                # fac_z = self.fac_model.encode(obs, task) # encode from obs
-                # fac_z = fac_z.unsqueeze(1).repeat(1, self.cfg.num_samples, 1) # [E, N, FS]
-                # value = self._estimate_individual_value(fac_z, actions, task, return_individual=False).nan_to_num(0) # [E, N, A]
                 elite_idxs = torch.topk(value.squeeze(2), self.cfg.num_elites, dim=1).indices # [E, EL]
                 elite_value = torch.gather(value, 1, elite_idxs.unsqueeze(2)) # [E, EL, 1]
                 elite_actions = torch.gather(actions, 2, elite_idxs.unsqueeze(1).unsqueeze(3).expand(-1, self.cfg.horizon, -1, self.cfg.action_dim)) # [E, H, EL, A]
+                # Update parameters
+                max_value = elite_value.max(1).values # [E, 1]
+                score = torch.exp(self.cfg.temperature*(elite_value - max_value.unsqueeze(1))) # [E, EL, 1]
+                score = (score / score.sum(1, keepdim=True)) # [E, EL, 1]
+                mean = (score.unsqueeze(1) * elite_actions).sum(2) / (score.sum(1, keepdim=True) + 1e-9) # [E, H, A]
+                std = ((score.unsqueeze(1) * (elite_actions - mean.unsqueeze(2)) ** 2).sum(2) / (score.sum(1, keepdim=True) + 1e-9)).sqrt() # [E, H, A]
+                std = std.clamp(self.cfg.min_std, self.cfg.max_std)
 
-            # Update parameters
-            max_value = elite_value.max(1).values # [E, A] or [E, 1]
-            score = torch.exp(self.cfg.temperature*(elite_value - max_value.unsqueeze(1))) # [E, EL, A] or [E, EL, 1]
-            score = (score / score.sum(1, keepdim=True)) # [E, EL, A] or [E, EL, 1]
-            mean = (score.unsqueeze(1) * elite_actions).sum(2) / (score.sum(1, keepdim=True) + 1e-9) # [E, H, A]
-            std = ((score.unsqueeze(1) * (elite_actions - mean.unsqueeze(2)) ** 2).sum(2) / (score.sum(1, keepdim=True) + 1e-9)).sqrt() # [E, H, A]
-            std = std.clamp(self.cfg.min_std, self.cfg.max_std)
             if self.cfg.multitask:
                 mean = mean * self.model._action_masks[task]
                 std = std * self.model._action_masks[task]
 
         # Select action
-        # decentralized version
-        if eval_mode and self.cfg.fac_model: 
-            rand_idx = torch.stack([math.gumbel_softmax_sample(score[..., i], dim=1) for i in range(self.cfg.action_dim)], dim=-1) # [E, A] gumbel_softmax_sample is compatible with cuda graphs
-            actions = torch.gather(elite_actions, 2, rand_idx.unsqueeze(1).unsqueeze(2).expand(-1, self.cfg.horizon, -1, -1)).squeeze(2) # [E, H, A]
+        # factorized version
+        if self.cfg.fac_model: 
+            rand_idx = torch.stack([math.gumbel_softmax_sample(score[..., i], dim=1) for i in range(self.cfg.num_agents)], dim=-1) # [E, NA] gumbel_softmax_sample is compatible with cuda graphs
+            actions = torch.gather(elite_actions, 2, rand_idx.unsqueeze(1).unsqueeze(2).unsqueeze(4).expand(-1, self.cfg.horizon, -1, -1, self.fac_model.action_dim_agent)).squeeze(2) # [E, H, NA, AN]
+            actions = actions.view(self.cfg.num_envs, self.cfg.horizon, -1) # [E, H, A]
         # centralized version
         else: 
             rand_idx = math.gumbel_softmax_sample(score.squeeze(2), dim=1)  # [E,] gumbel_softmax_sample is compatible with cuda graphs
@@ -375,9 +390,9 @@ z (torch.Tensor): Latent state from which to plan.
             action_sample = action.unsqueeze(2) + std_noises * r # [H, BS, NS, A]
             fac_z = self.fac_model.encode(zs[0].clone().detach()).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS]
             # fac_z = self.fac_model.encode(obs[0].clone().detach()).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS] # encode from obs
-            fac_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.fac_model.latent_dim_node * self.fac_model.num_agents, device=self.device) # [H, BS, NS, FS]
+            fac_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.fac_model.latent_dim_agent * self.fac_model.num_agents, device=self.device) # [H, BS, NS, FS]
             fac_zs[0] = fac_z
-            fac_zs_sp = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.fac_model.latent_dim_node * self.fac_model.num_agents, device=self.device) # [H, BS, NS, FS]
+            fac_zs_sp = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.fac_model.latent_dim_agent * self.fac_model.num_agents, device=self.device) # [H, BS, NS, FS]
             fac_zs_sp[0] = fac_z.detach() # self_predictive
             # sampled zs
             global_z = zs[0].clone().detach().unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, S]
@@ -395,7 +410,7 @@ z (torch.Tensor): Latent state from which to plan.
                 fac_consistency_loss = fac_consistency_loss + F.mse_loss(fac_z, fac_z_sp) * self.cfg.fac_rho**t
 
             _fac_zs_sample = fac_zs[:-1]
-            _fac_zs_sample = _fac_zs_sample.view(self.cfg.horizon, -1, self.fac_model.latent_dim_node * self.fac_model.num_agents) # [H, BS*NS, FS]
+            _fac_zs_sample = _fac_zs_sample.view(self.cfg.horizon, -1, self.fac_model.latent_dim_agent * self.fac_model.num_agents) # [H, BS*NS, FS]
             _zs_sample = global_zs[:-1]
             _zs_sample = _zs_sample.view(self.cfg.horizon, -1, self.cfg.latent_dim) # [H, BS*NS, S]
             action_sample = action_sample.view(self.cfg.horizon, -1, self.cfg.action_dim) # [H, BS*NS, S]
