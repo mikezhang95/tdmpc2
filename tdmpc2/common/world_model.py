@@ -3,11 +3,11 @@ from copy import deepcopy
 import numpy as np
 import torch
 import torch.nn as nn
-
-from common import layers, math, init
 from tensordict.nn import TensorDictParams
 import monotonicnetworks as lmn
 
+from common import layers, math, init
+from common.utils import benchmark_torch_function
 
 class WorldModel(nn.Module):
     """

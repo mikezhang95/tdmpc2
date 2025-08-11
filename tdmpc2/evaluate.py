@@ -46,6 +46,10 @@ def evaluate(cfg: dict):
 	print(colored(f'Model size: {cfg.get("model_size", "default")}', 'blue', attrs=['bold']))
 	print(colored(f'Checkpoint: {cfg.checkpoint}', 'blue', attrs=['bold']))
 	print(colored(f'Device: {cfg.device}', 'blue', attrs=['bold']))
+	if cfg.device == 'cpu':
+		num_thread = cfg.num_agents if cfg.fac_model else 1
+		torch.set_num_threads(num_thread) 
+		print(colored(f'CPU threads used: {num_thread}', 'blue'))
 	if not cfg.multitask and ('mt80' in cfg.checkpoint or 'mt30' in cfg.checkpoint):
 		print(colored('Warning: single-task evaluation of multi-task models is not currently supported.', 'red', attrs=['bold']))
 		print(colored('To evaluate a multi-task model, use task=mt80 or task=mt30.', 'red', attrs=['bold']))
@@ -88,13 +92,15 @@ def evaluate(cfg: dict):
 			if cfg.save_video:
 				imageio.mimsave(
 					os.path.join(video_dir, f'{task}-{i}.mp4'), frames, fps=15)
-		ep_rewards = np.mean(ep_rewards)
-		ep_successes = np.mean(ep_successes)
+		avg_ep_rewards = np.mean(ep_rewards)
+		avg_ep_successes = np.mean(ep_successes)
+		std_ep_rewards = np.std(ep_rewards)
+		std_ep_successes = np.std(ep_successes)
 		if cfg.multitask:
 			scores.append(ep_successes*100 if task.startswith('mw-') else ep_rewards/10)
 		print(colored(f'  {task:<22}' \
-			f'\tR: {ep_rewards:.01f}  ' \
-			f'\tS: {ep_successes:.02f}', 'yellow'))
+			f'\tR: {avg_ep_rewards:.01f} \pm {std_ep_rewards:.01f} ' \
+			f'\tS: {avg_ep_successes:.02f} \pm {std_ep_successes:.02f}', 'yellow'))
 	if cfg.multitask:
 		print(colored(f'Normalized score: {np.mean(scores):.02f}', 'yellow', attrs=['bold']))
 

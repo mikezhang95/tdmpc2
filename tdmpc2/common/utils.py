@@ -33,7 +33,7 @@ def benchmark_torch_function(runs=10):
             avg_time = np.mean(execution_times)
             std_time = np.std(execution_times)
             device = "GPU" if is_cuda else "CPU"
-            print(f"Function [{func.__name__}] Device [{device}] avg time over {runs} runs: {avg_time:.3f} \pm {std_time:.3f} ms")
+            print(f"Function [{func.__name__}] Device [{device}] avg time over {runs} runs: {avg_time:.2f} \pm {std_time:.2f} ms")
             return result
 
         return wrapper
