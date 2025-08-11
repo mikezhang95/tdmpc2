@@ -62,6 +62,10 @@ class TDMPC2(torch.nn.Module):
             self.model = AttnTOLD(cfg).to(self.device) # TDMPC-Attention
         elif cfg.model_type == "fac_told":
             self.model = FacTOLD(cfg).to(self.device) # TDMPC-Fac
+        elif cfg.model_type == "tdmpc":
+            self.model = TOLD(cfg).to(self.device) # TDMPC
+        elif cfg.model_type == "tdmpc2":
+            self.model = WorldModel(cfg).to(self.device) # TDMPC2
         else:
             self.model = TOLD(cfg).to(self.device) # TDMPC
         self.optim = torch.optim.Adam([
