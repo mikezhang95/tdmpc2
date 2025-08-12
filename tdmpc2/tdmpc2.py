@@ -1,51 +1,17 @@
 import torch
 import torch.nn.functional as F
+from tensordict import TensorDict
+import numpy as np
+import time
 
 from common import math
 from common.scale import RunningScale
 from common.world_model import WorldModel
-from tensordict import TensorDict
-
-from common.world_model import FacWorldModel
-import numpy as np
-import time
-from functools import wraps
-
-from common.world_model import TOLD, FacTOLD
+from common.world_model import TOLD
+from common.world_model import FacTOLD
 from common.world_model import AttnTOLD
+from common.world_model import FacWorldModel
 
-def benchmark_torch_function(func):
-    """
-    Decorator to calculate the average running time of a PyTorch function over 10 executions.
-    """
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        execution_times = []
-        for _ in range(10):  # Run the function 10 times
-            # Create CUDA events
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-
-            # Record start event
-            start_event.record()
-
-            result = func(*args, **kwargs)
-
-            # Record end event
-            end_event.record()
-        
-            # Wait for all streams to synchronize
-            torch.cuda.synchronize()
-        
-            # Calculate elapsed time in milliseconds
-            elapsed_time_ms = start_event.elapsed_time(end_event)
-            execution_times.append(elapsed_time_ms)
-        
-        avg_time = sum(execution_times) / len(execution_times)
-        print(f"Function '{func.__name__}' took an average of {avg_time:.6f} ms over 10 runs.")
-        return result
-    
-    return wrapper
 
 class TDMPC2(torch.nn.Module):
     """
@@ -66,6 +32,8 @@ class TDMPC2(torch.nn.Module):
             self.model = TOLD(cfg).to(self.device) # TDMPC
         elif cfg.model_type == "tdmpc2":
             self.model = WorldModel(cfg).to(self.device) # TDMPC2
+        elif cfg.model_type == "fac_world_model":
+            self.model = FacWorldModel(cfg).to(self.device) # Fac-TDMPC2
         else:
             self.model = TOLD(cfg).to(self.device) # TDMPC
         self.optim = torch.optim.Adam([
@@ -231,7 +199,7 @@ class TDMPC2(torch.nn.Module):
             if self.cfg.multitask:
                 actions = actions * self.model._action_masks[task]
 
-            # Compute elite actions
+            # Compute elite actions: always global control in online
             if eval_mode and self.cfg.model_type == "current_not_in_use":  # decentralized version
                 fac_z = self.model.encode(z, task)
                 value = self._estimate_individual_value(fac_z, actions, task).nan_to_num(0).squeeze(-1) # [E, N, A]
@@ -257,7 +225,7 @@ class TDMPC2(torch.nn.Module):
 
         # Select action
         # decentralized version
-        if eval_mode and self.cfg.model_type == "current_no_in_use": 
+        if eval_mode and self.cfg.model_type == "current_not_in_use": 
             rand_idx = torch.stack([math.gumbel_softmax_sample(score[..., i], dim=1) for i in range(self.cfg.action_dim)], dim=-1) # [E, A] gumbel_softmax_sample is compatible with cuda graphs
             actions = torch.gather(elite_actions, 2, rand_idx.unsqueeze(1).unsqueeze(2).expand(-1, self.cfg.horizon, -1, -1)).squeeze(2) # [E, H, A]
         # centralized version
