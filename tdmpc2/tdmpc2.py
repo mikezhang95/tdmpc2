@@ -1,16 +1,13 @@
 import torch
 import torch.nn.functional as F
+from tensordict import TensorDict
+import numpy as np
+import time
 
 from common import math
 from common.scale import RunningScale
 from common.world_model import WorldModel
-from tensordict import TensorDict
-
 from common.world_model import FacWorldModel
-import numpy as np
-import time
-from functools import wraps
-
 from common.world_model import TOLD, FacTOLD
 
 
@@ -25,7 +22,10 @@ class TDMPC2(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.device= torch.device(cfg.device)
-        self.model = TOLD(cfg).to(self.device) # TDMPC
+        if hasattr(cfg, 'model_type') and cfg.model_type == 'fac_world_model':
+            self.model = WorldModel(cfg).to(self.device) # TDMPC2
+        else:
+            self.model = TOLD(cfg).to(self.device) # TDMPC
         self.optim = torch.optim.Adam([
             {'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
             {'params': self.model._dynamics.parameters()},
@@ -35,9 +35,12 @@ class TDMPC2(torch.nn.Module):
             ], lr=self.cfg.lr, capturable=True)
 
         if self.cfg.fac_model:
-            self.fac_model = FacTOLD(cfg).to(self.device)
+            if hasattr(cfg, 'model_type') and cfg.model_type == 'fac_world_model':
+                self.fac_model = FacWorldModel(cfg).to(self.device)
+            else:
+                self.fac_model = FacTOLD(cfg).to(self.device)
             self.fac_optim = torch.optim.Adam([
-                {'params': self.fac_model._encoder.parameters()},
+                {'params': self.fac_model._encoder.parameters()}, 
                 {'params': self.fac_model._dynamics.parameters()},
                 {'params': self.fac_model._reward.parameters()},
                 {'params': self.fac_model._Qs.parameters()},
@@ -429,6 +432,7 @@ z (torch.Tensor): Latent state from which to plan.
                 # Baseline: mse loss or kl loss
                 # fac_reward_loss = fac_reward_loss + math.soft_ce(pred_rew_unbind, rew_unbind, self.cfg).mean() * self.cfg.fac_rho**t
                 pred_rew_unbind = pred_rew_unbind.view(self.cfg.batch_size, num_noises)
+                rew_unbind = math.two_hot_inv(rew_unbind, self.cfg)
                 rew_unbind = rew_unbind.view(self.cfg.batch_size, num_noises)
                 fac_reward_loss = fac_reward_loss + math.softmax_distillation_loss(pred_rew_unbind, rew_unbind, self.cfg.temperature).mean() * self.cfg.fac_rho**t
                 for _, pred_qs_unbind_unbind in enumerate(pred_qs_unbind.unbind(0)):

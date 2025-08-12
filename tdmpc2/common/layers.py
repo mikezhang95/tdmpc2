@@ -246,6 +246,183 @@ class FullyConnectedGraph(nn.Module):
         return node_outputs, edge_outputs
 
 
+# class VectorizedLinearLayer(nn.Module):
+#     """Vectorized version of torch.nn.Linear."""
+
+#     def __init__(
+#         self,
+#         population_size: int,
+#         in_features: int,
+#         out_features: int,
+#         use_layer_norm: bool = False,
+#         dropout: float = 0., 
+#         act = None,
+#     ):
+#         super().__init__()
+#         self._population_size = population_size
+#         self._in_features = in_features
+#         self._out_features = out_features
+
+#         self.weight = torch.nn.Parameter(
+#             torch.empty(self._population_size, self._in_features, self._out_features),
+#             requires_grad=True,
+#         )
+#         self.bias = torch.nn.Parameter(
+#             torch.empty(self._population_size, 1, self._out_features),
+#             requires_grad=True,
+#         )
+
+#         for member_id in range(population_size):
+#             torch.nn.init.kaiming_uniform_(self.weight[member_id], a=math.sqrt(5))
+#         fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(self.weight[0])
+#         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+#         torch.nn.init.uniform_(self.bias, -bound, bound)
+
+#         self._layer_norm = (
+#             torch.nn.LayerNorm(self._out_features, self._population_size)
+#             if use_layer_norm
+#             else None
+#         )
+
+#         # M: add activation and dropout
+#         self._act = act
+#         self._dropout = nn.Dropout(dropout, inplace=False) if dropout else None
+
+    
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         Args:
+#             - x: [population_size, batch_size, in_features]
+#         Returns:
+#             - x: [population_size, batch_size, out_features]
+#         """
+#         assert x.shape[0] == self._population_size
+#         x = x.matmul(self.weight) + self.bias
+#         if self._layer_norm is not None:
+#             x = self._layer_norm(x)
+#         if self._dropout:
+#             x = self._dropout(x)
+#         if self._act:
+#             return self._act(x)
+#         else: 
+#             return x
+    
+#     def __repr__(self):
+#         repr_dropout = f", dropout={self._dropout.p}" if self._dropout else ", dropout=None"
+#         repr_act = f"act={self._act.__class__.__name__})" if self._act else "act=None)"
+#         return f"VectorizedLinearLayer(in_features={self._in_features}, "\
+#             f"out_features={self._out_features}, "\
+#             f"bias={self.bias is not None}{repr_dropout}, "\
+#             f"{repr_act}"
+
+
+# class QMIXNet(nn.Module):
+#     """
+#     Inspired from QMIX
+#     """
+#     def __init__(self,
+#                 num_agents,
+#                 state_dim,
+#                 num_layers=2,
+#                 mixing_hidden_size=32):
+
+#         super(QMIXNet, self).__init__()
+
+#         self.num_agents = num_agents
+#         self.state_dim = state_dim
+#         self.mixing_hidden_size = mixing_hidden_size
+#         self.num_layers = num_layers
+
+#         # Generate mixing network
+#         if num_layers == 2:
+#             self.hyper_w_1 = nn.Linear(self.state_dim, self.num_agents * self.mixing_hidden_size)
+#             self.hyper_b_1 = nn.Linear(self.state_dim, self.mixing_hidden_size)
+#             self.l2_dim = self.mixing_hidden_size
+#         elif num_layers == 1:
+#             self.l2_dim = self.num_agents
+#         self.hyper_w_2 = nn.Linear(self.state_dim, self.l2_dim)
+#         self.hyper_b_2 = nn.Sequential(nn.Linear(self.state_dim, self.mixing_hidden_size),
+#                                nn.ReLU(),
+#                                nn.Linear(self.mixing_hidden_size, 1))
+
+#     def forward(self, agent_qs, global_state):
+#         """
+#         The forward model takes the state to be given to the hyper-networks
+#         and agent observations as a single tensor (concatenation of
+#         agent local current observation, one-hot encoded last action, one-hot encoded agent_id)
+#         """
+#         state_shape = global_state.shape
+
+#         if self.num_layers == 2:
+#             # First layer 
+#             w1 = self.hyper_w_1(global_state)
+#             w1 = w1.view(*state_shape[:-1], self.num_agents, self.mixing_hidden_size)
+#             # w1 = torch.abs(w1)
+#             w1 = F.softmax(w1, dim=-1)
+#             b1 = self.hyper_b_1(global_state)
+#             b1 = b1.view(*state_shape[:-1], 1, self.mixing_hidden_size)
+#             q_tot = nn.functional.elu(torch.matmul(agent_qs.unsqueeze(-2), w1) + b1)
+#         else:
+#             q_tot = agent_qs.unsqueeze(-2)
+
+#         # Second layer 
+#         w2 = self.hyper_w_2(global_state)
+#         w2 = w2.view(*state_shape[:-1], self.l2_dim, 1)
+#         # w2 = torch.abs(w2)
+#         w2 = F.softmax(w2, dim=-2)
+#         b2 = self.hyper_b_2(global_state)
+#         b2 = b2.view(*state_shape[:-1], 1, 1)
+#         q_tot = torch.matmul(q_tot, w2) + b2
+#         return q_tot.squeeze(-2)
+
+
+
+class FacMLP(nn.Module):
+    """
+    FullyConnectedGraph layer with LayerNorm, activation, and optionally dropout.
+    M: currently doesn't need aggregate function in GNN, only use this structure to easily calculate node/edge features
+    """
+    def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0., shared_parameters=False):
+        super(FacMLP, self).__init__()
+        self.num_nodes = num_nodes
+
+        # Define custom MLPs or other functions for node and edge updates
+        # M: can be extended to non-shared networks, then use for-loop should run fast
+        self.shared_parameters = shared_parameters
+        if not self.shared_parameters:
+            # M: naive implementation
+            # self.node_update = nn.ModuleList([mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_nodes)])
+            # M: vectorize implementation
+            node_dims = [node_in_dim] + mlp_dims + [node_out_dim]
+            self.node_update = []
+            for i in range(len(node_dims)-1):
+                if i == len(node_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
+                else: layer_act = nn.Mish(inplace=False)
+                if i == 0: layer_dropout = dropout
+                else: layer_dropout = 0.
+                if layer_act is not None: use_layer_norm = True
+                else: use_layer_norm = False
+                self.node_update.append(VectorizedLinearLayer(self.num_nodes, node_dims[i], node_dims[i+1], 
+                                                              use_layer_norm=use_layer_norm, act=layer_act, dropout=layer_dropout))
+            self.node_update = nn.Sequential(*self.node_update)
+
+    def forward(self, node_features):
+        """
+        Args:
+            - node_features: [..., num_nodes, feature_dim]
+        """
+        # Reshape inputs to 3D vectors
+        raw_input_shape = node_features.shape # [..., num_nodes, input_dim]
+        node_features = node_features.view(-1, raw_input_shape[-2], raw_input_shape[-1]).contiguous() # [B, num_nodes, input_dim]
+
+        # Update node outputs
+        node_outputs = self.node_update(node_features)
+
+        # Reshape outputs back to 4D/3D vectors
+        node_outputs = node_outputs.view(*raw_input_shape[:-2], self.num_nodes, -1).contiguous() # [..., num_nodes, node_dim]
+        return node_outputs
+
+
 class VectorizedLinearLayer(nn.Module):
     """Vectorized version of torch.nn.Linear."""
 
@@ -263,6 +440,7 @@ class VectorizedLinearLayer(nn.Module):
         self._in_features = in_features
         self._out_features = out_features
 
+        # linear weights
         self.weight = torch.nn.Parameter(
             torch.empty(self._population_size, self._in_features, self._out_features),
             requires_grad=True,
@@ -272,19 +450,25 @@ class VectorizedLinearLayer(nn.Module):
             requires_grad=True,
         )
 
+        # M: init
         for member_id in range(population_size):
-            torch.nn.init.kaiming_uniform_(self.weight[member_id], a=math.sqrt(5))
-        fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(self.weight[0])
-        bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-        torch.nn.init.uniform_(self.bias, -bound, bound)
+            torch.nn.init.trunc_normal_(self.weight[member_id].data, std=0.02)
+            # torch.nn.init.orthogonal_(self.weight[member_id].data)
+        torch.nn.init.zeros_(self.bias)
+        # for member_id in range(population_size):
+        #     torch.nn.init.kaiming_uniform_(self.weight[member_id], a=math.sqrt(5))
+        # fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(self.weight[0])
+        # bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+        # torch.nn.init.uniform_(self.bias, -bound, bound)
 
+        # layernorm
         self._layer_norm = (
-            torch.nn.LayerNorm(self._out_features, self._population_size)
+            torch.nn.LayerNorm(self._out_features)
             if use_layer_norm
             else None
         )
 
-        # M: add activation and dropout
+        # M: activation and dropout
         self._act = act
         self._dropout = nn.Dropout(dropout, inplace=False) if dropout else None
 
@@ -292,10 +476,11 @@ class VectorizedLinearLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            - x: [population_size, batch_size, in_features]
+            - x: [batch_size, population, in_features]
         Returns:
-            - x: [population_size, batch_size, out_features]
+            - x: [batch_size, population, out_features]
         """
+        x = x.transpose(0, 1)
         assert x.shape[0] == self._population_size
         x = x.matmul(self.weight) + self.bias
         if self._layer_norm is not None:
@@ -303,74 +488,17 @@ class VectorizedLinearLayer(nn.Module):
         if self._dropout:
             x = self._dropout(x)
         if self._act:
-            return self._act(x)
-        else: 
-            return x
+            x = self._act(x)
+        x = x.transpose(0, 1)
+        return x
     
     def __repr__(self):
-        repr_dropout = f", dropout={self._dropout.p}" if self._dropout else ", dropout=None"
+        repr_dropout = f"dropout={self._dropout.p}" if self._dropout else "dropout=None"
+        repr_ln = f"ln={self._layer_norm.__class__.__name__}" if self._layer_norm else "ln=None"
         repr_act = f"act={self._act.__class__.__name__})" if self._act else "act=None)"
-        return f"VectorizedLinearLayer(in_features={self._in_features}, "\
+        return f"VectorizedLinearLayer(population_size={self._population_size}, in_features={self._in_features}, "\
             f"out_features={self._out_features}, "\
-            f"bias={self.bias is not None}{repr_dropout}, "\
+            f"bias={self.bias is not None}, "\
+            f"{repr_dropout}, "\
+            f"{repr_ln}, "\
             f"{repr_act}"
-
-
-class QMIXNet(nn.Module):
-    """
-    Inspired from QMIX
-    """
-    def __init__(self,
-                num_agents,
-                state_dim,
-                num_layers=2,
-                mixing_hidden_size=32):
-
-        super(QMIXNet, self).__init__()
-
-        self.num_agents = num_agents
-        self.state_dim = state_dim
-        self.mixing_hidden_size = mixing_hidden_size
-        self.num_layers = num_layers
-
-        # Generate mixing network
-        if num_layers == 2:
-            self.hyper_w_1 = nn.Linear(self.state_dim, self.num_agents * self.mixing_hidden_size)
-            self.hyper_b_1 = nn.Linear(self.state_dim, self.mixing_hidden_size)
-            self.l2_dim = self.mixing_hidden_size
-        elif num_layers == 1:
-            self.l2_dim = self.num_agents
-        self.hyper_w_2 = nn.Linear(self.state_dim, self.l2_dim)
-        self.hyper_b_2 = nn.Sequential(nn.Linear(self.state_dim, self.mixing_hidden_size),
-                               nn.ReLU(),
-                               nn.Linear(self.mixing_hidden_size, 1))
-
-    def forward(self, agent_qs, global_state):
-        """
-        The forward model takes the state to be given to the hyper-networks
-        and agent observations as a single tensor (concatenation of
-        agent local current observation, one-hot encoded last action, one-hot encoded agent_id)
-        """
-        state_shape = global_state.shape
-
-        if self.num_layers == 2:
-            # First layer 
-            w1 = self.hyper_w_1(global_state)
-            w1 = w1.view(*state_shape[:-1], self.num_agents, self.mixing_hidden_size)
-            # w1 = torch.abs(w1)
-            w1 = F.softmax(w1, dim=-1)
-            b1 = self.hyper_b_1(global_state)
-            b1 = b1.view(*state_shape[:-1], 1, self.mixing_hidden_size)
-            q_tot = nn.functional.elu(torch.matmul(agent_qs.unsqueeze(-2), w1) + b1)
-        else:
-            q_tot = agent_qs.unsqueeze(-2)
-
-        # Second layer 
-        w2 = self.hyper_w_2(global_state)
-        w2 = w2.view(*state_shape[:-1], self.l2_dim, 1)
-        # w2 = torch.abs(w2)
-        w2 = F.softmax(w2, dim=-2)
-        b2 = self.hyper_b_2(global_state)
-        b2 = b2.view(*state_shape[:-1], 1, 1)
-        q_tot = torch.matmul(q_tot, w2) + b2
-        return q_tot.squeeze(-2)

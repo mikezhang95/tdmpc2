@@ -30,9 +30,12 @@ export CUDA_VISIBLE_DEVICES=0
 
 # 2. imitation learning, train fac model
 num_agents=6
-exp_name=il-fac_N${num_agents}
+exp_name=il-fac2_N${num_agents}
 
 task_name=walker-run # 6
+# task_name=quadruped-run # 12 
+# task_name=humanoid-run # 21
+
 # task_name=fish-swim # 5
 # task_name=reacher-three-easy # 3
 # task_name=hopper-stand # 4
@@ -42,33 +45,11 @@ task_name=walker-run # 6
 # task_name=hopper-hop # 4
 # task_name=hopper-hop-backwards # 4
 
-python -u train.py  --config-path=./configs --config-name=il_fac \
+python -u train.py  --config-path=./configs --config-name=il_fac2 \
                     task=${task_name} \
                     num_agents=${num_agents} \
                     exp_name=${exp_name} \
-                    data_dir=${PWD}/logs/${task_name}/1/online-tdmpc/buffer.pt \
-                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc/models/final.pt \
+                    data_dir=${PWD}/logs/${task_name}/1/online-tdmpc2/buffer.pt \
+                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc2/models/final.pt \
                     steps=500000 \
                     compile=True \
-		    seed=1 &
-
-python -u train.py  --config-path=./configs --config-name=il_fac \
-                    task=${task_name} \
-                    num_agents=${num_agents} \
-                    exp_name=${exp_name} \
-                    data_dir=${PWD}/logs/${task_name}/1/online-tdmpc/buffer.pt \
-                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc/models/final.pt \
-                    steps=500000 \
-                    compile=True \
-		    seed=2 &
-
-python -u train.py  --config-path=./configs --config-name=il_fac \
-                    task=${task_name} \
-                    num_agents=${num_agents} \
-                    exp_name=${exp_name} \
-                    data_dir=${PWD}/logs/${task_name}/1/online-tdmpc/buffer.pt \
-                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc/models/final.pt \
-                    steps=500000 \
-                    compile=True \
-		    seed=3 &
-
