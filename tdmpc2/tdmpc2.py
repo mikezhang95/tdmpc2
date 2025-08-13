@@ -154,7 +154,8 @@ class TDMPC2(torch.nn.Module):
         """Estimate value of a trajectory starting at latent state z and executing given actions."""
         G, discount = 0, 1
         for t in range(self.cfg.horizon - 1): 
-            reward = math.two_hot_inv(self.fac_model.reward(z, actions[:, t], task, return_individual=return_individual), self.cfg)
+            # reward = math.two_hot_inv(self.fac_model.reward(z, actions[:, t], task, return_individual=return_individual), self.cfg)
+            reward = self.fac_model.reward(z, actions[:, t], task, return_individual=return_individual) # M: only support num_bins=0
             z = self.fac_model.next(z, actions[:, t], task, return_individual=True)
             G = G + discount * reward
             discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount

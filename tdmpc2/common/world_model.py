@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from tensordict.nn import TensorDictParams
-import monotonicnetworks as lmn
+# import monotonicnetworks as lmn
 
 from common import layers, math, init
 from common.utils import benchmark_torch_function
@@ -288,7 +288,8 @@ class FacWorldModel(WorldModel):
             return out
 
         qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
-        Q = math.two_hot_inv(out[qidx], self.cfg)
+        # Q = math.two_hot_inv(out[qidx], self.cfg)
+        Q = out[qidx] # M: factor models only support num_bins=0
         if return_type == "min":
             return Q.min(0).values
         return Q.sum(0) / 2
@@ -342,7 +343,7 @@ class FacTOLD(WorldModel):
         # MC: action/latent dimensions
         self.num_agents = cfg.num_agents # number of agents
         self.action_dim_agent = cfg.action_dim // self.num_agents
-        self.latent_dim_agent = cfg.latent_dim
+        self.latent_dim_agent = max(cfg.latent_dim // self.num_agents, 50)
         self.cfg = cfg
 
         # modules
@@ -351,13 +352,13 @@ class FacTOLD(WorldModel):
         # self._encoder = tdmpc_utils.mlp(cfg.obs_shape['state'][0], cfg.enc_dim, self.latent_dim_agent*self.num_agents)
 
         self._dynamics = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], self.latent_dim_agent) 
-        self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], max(cfg.num_bins, 1))
-        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], max(cfg.num_bins, 1), is_q=True) for _ in range(cfg.num_q)])
+        self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], 1)
+        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], 1, is_q=True) for _ in range(cfg.num_q)])
 
         # MC: mixing network
         # === LMN ===
-        self._reward_mixer = lmn.MonotonicLayer(self.num_agents, 1)
-        self._value_mixer = lmn.MonotonicLayer(self.num_agents, 1)
+        # self._reward_mixer = lmn.MonotonicLayer(self.num_agents, 1)
+        # self._value_mixer = lmn.MonotonicLayer(self.num_agents, 1)
         # lip_nn = nn.Sequential(
         #     lmn.LipschitzLinear(self.num_agents, 32, kind="one-inf"),
         #     lmn.GroupSort(2),
@@ -445,7 +446,8 @@ class FacTOLD(WorldModel):
             return out
 
         qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
-        Q = math.two_hot_inv(out[qidx], self.cfg)
+        # Q = math.two_hot_inv(out[qidx], self.cfg)
+        Q = out[qidx] # M: factor models only support num_bins=0
         if return_type == "min":
             return Q.min(0).values
         return Q.sum(0) / 2
