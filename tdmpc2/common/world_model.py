@@ -201,7 +201,7 @@ class FacWorldModel(WorldModel):
         nn.Module.__init__(self)
 
         # M: action/latent dimensions
-        self.num_agents = cfg.action_dim # number of agents
+        self.num_agents = cfg.num_agents
         self.action_dim_node = cfg.action_dim // self.num_agents
         self.latent_dim_node = max(cfg.latent_dim // self.num_agents, 50)
         self.latent_dim_node = self.latent_dim_node // cfg.simnorm_dim * cfg.simnorm_dim
@@ -341,7 +341,7 @@ class FacTOLD(WorldModel):
         nn.Module.__init__(self)
 
         # M: action/latent dimensions
-        self.num_agents = cfg.action_dim # number of agents
+        self.num_agents = cfg.num_agents # number of agents
         self.action_dim_node = cfg.action_dim // self.num_agents
         self.latent_dim_node = cfg.latent_dim # // self.num_agents
         cfg.latent_dim = self.latent_dim_node * self.num_agents
