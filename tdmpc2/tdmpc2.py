@@ -6,6 +6,7 @@ import time
 
 from common import math
 from common.scale import RunningScale
+from common.layers import api_model_conversion
 from common.world_model import WorldModel
 from common.world_model import FacWorldModel
 from common.world_model import TOLD, FacTOLD
@@ -22,7 +23,7 @@ class TDMPC2(torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.device= torch.device(cfg.device)
-        if hasattr(cfg, 'model_type') and cfg.model_type == 'fac_world_model':
+        if hasattr(cfg, 'model_type') and 'world_model' in cfg.model_type:
             self.model = WorldModel(cfg).to(self.device) # TDMPC2
         else:
             self.model = TOLD(cfg).to(self.device) # TDMPC
@@ -108,7 +109,12 @@ class TDMPC2(torch.nn.Module):
             fp (str or dict): Filepath or state dict to load.
         """
         state_dict = fp if isinstance(fp, dict) else torch.load(fp, map_location=self.device)
-        self.model.load_state_dict(state_dict["model"])
+        if "dmcontrol" in self.cfg.checkpoint:
+            model_state_dict = state_dict["model"] if "model" in state_dict else state_dict
+            model_state_dict = api_model_conversion(self.model.state_dict(), model_state_dict)
+            self.model.load_state_dict(model_state_dict)
+        else:
+            self.model.load_state_dict(state_dict["model"])
         if self.cfg.fac_model and "fac_model" in state_dict:
             self.fac_model.load_state_dict(state_dict["fac_model"])
 

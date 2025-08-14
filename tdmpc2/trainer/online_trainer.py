@@ -98,7 +98,7 @@ class OnlineTrainer(Trainer):
 				self._tds = [self.to_td(obs)]
 
 			# Collect experience
-			if self._step > self.cfg.seed_steps:
+			if self._step > self.cfg.seed_steps or self.cfg.lr == 0.0 :
 				action = self.agent.act(obs, t0=len(self._tds)==1)
 			else:
 				action = self.env.rand_act()
@@ -106,7 +106,7 @@ class OnlineTrainer(Trainer):
 			self._tds.append(self.to_td(obs, action, reward))
 
 			# Update agent
-			if self._step >= self.cfg.seed_steps:
+			if self._step >= self.cfg.seed_steps and self.cfg.lr > 0.0 :
 				if self._step == self.cfg.seed_steps:
 					num_updates = int(self.cfg.seed_steps / self.cfg.steps_per_update)
 					print('Pretraining agent on seed data...')
