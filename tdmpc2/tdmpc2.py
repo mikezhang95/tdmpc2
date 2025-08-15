@@ -114,7 +114,7 @@ class TDMPC2(torch.nn.Module):
             model_state_dict = api_model_conversion(self.model.state_dict(), model_state_dict)
             self.model.load_state_dict(model_state_dict)
         else:
-            self.model.load_state_dict(state_dict["model"])
+            self.model.load_state_dict(state_dict["model"], strict=False)
         if self.cfg.fac_model and "fac_model" in state_dict:
             self.fac_model.load_state_dict(state_dict["fac_model"])
 

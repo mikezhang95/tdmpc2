@@ -343,7 +343,7 @@ class FacTOLD(WorldModel):
         # MC: action/latent dimensions
         self.num_agents = cfg.num_agents # number of agents
         self.action_dim_agent = cfg.action_dim // self.num_agents
-        self.latent_dim_agent = max(cfg.latent_dim // self.num_agents, 50)
+        self.latent_dim_agent = cfg.latent_dim
         self.cfg = cfg
 
         # modules
