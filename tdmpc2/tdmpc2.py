@@ -192,10 +192,9 @@ z (torch.Tensor): Latent state from which to plan.
             z = self.student_model.encode(z, task)
             # z = self.student_model.encode(obs, task)
             cfg, model = self.student_cfg, self.student_model
-            num_agents = cfg.num_agents if hasattr(cfg, 'num_agents') else 1
         else:
             cfg, model = self.cfg, self.model
-            num_agents = 1
+        num_agents = cfg.num_agents if hasattr(cfg, 'num_agents') else 1
         action_dim_agent = cfg.action_dim // num_agents
 
         # Sample policy trajectories

@@ -253,6 +253,7 @@ class FacTOLD(WorldModel):
             self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.enc_dim, self.latent_dim_agent*self.num_agents)
             # self._encoder = tdmpc_utils.mlp(cfg.obs_shape['state'][0], cfg.enc_dim, self.latent_dim_agent*self.num_agents)
         else:
+            cfg.latent_dim = self.latent_dim_agent * self.num_agents
             self._encoder = tdmpc_utils.enc(cfg)
             self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim)
 
