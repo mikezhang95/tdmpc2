@@ -47,7 +47,7 @@ def evaluate(cfg: dict):
 	print(colored(f'Checkpoint: {cfg.checkpoint}', 'blue', attrs=['bold']))
 	print(colored(f'Device: {cfg.device}', 'blue', attrs=['bold']))
 	if cfg.device == 'cpu':
-		num_thread = cfg.num_agents if cfg.fac_model else 1
+		num_thread = cfg.student_cfg['num_agents'] if hasattr(cfg, 'student_cfg') and 'num_agents' in cfg.student_cfg.fac_model else 1
 		torch.set_num_threads(num_thread) 
 		print(colored(f'CPU threads used: {num_thread}', 'blue'))
 	if not cfg.multitask and ('mt80' in cfg.checkpoint or 'mt30' in cfg.checkpoint):

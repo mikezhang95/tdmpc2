@@ -89,4 +89,10 @@ def parse_cfg(cfg: OmegaConf) -> OmegaConf:
 	else:
 		cfg.device = "cpu"
 
-	return cfg_to_dataclass(cfg)
+    # Check student model configs
+	# return cfg_to_dataclass(cfg)
+	cfg = cfg_to_dataclass(cfg)
+	if hasattr(cfg, 'student_cfg'):
+		cfg.student_cfg["action_dim"] = cfg.action_dim
+		cfg.student_cfg = cfg_to_dataclass(OmegaConf.create(cfg.student_cfg))
+	return cfg

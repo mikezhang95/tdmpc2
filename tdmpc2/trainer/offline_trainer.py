@@ -99,9 +99,6 @@ class OfflineTrainer(Trainer):
 					self.logger.log(eval_metrics, 'eval')
 					# metrics.update(self.eval())
 					# self.logger.pprint_multitask(metrics, self.cfg)
-					if i > 0:
-						self.logger.save_agent(self.agent, identifier=f'{i}')
-
 					# save best model
 					if eval_metrics['episode_reward'] > best_episode_reward:
 						best_episode_reward = eval_metrics['episode_reward'] 

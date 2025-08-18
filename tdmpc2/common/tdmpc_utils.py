@@ -144,101 +144,6 @@ class RandomShiftsAug(nn.Module):
 		grid = base_grid + shift
 		return F.grid_sample(x, grid, padding_mode='zeros', align_corners=False)
 
-class FullyConnectedGraph(nn.Module):
-    """
-    FullyConnectedGraph layer with LayerNorm, activation, and optionally dropout.
-    M: currently doesn't need aggregate function in GNN, only use this structure to easily calculate node/edge features
-    """
-    def __init__(self, num_nodes, node_in_dim, mlp_dims, node_out_dim, act=None, dropout=0., use_edge=True, is_q=False):
-        super(FullyConnectedGraph, self).__init__()
-        self.num_nodes = num_nodes
-        self.num_edges = num_nodes * (num_nodes - 1) // 2
-
-        # Define custom MLPs or other functions for node and edge updates
-        # M: can be extended to non-shared networks, then use for-loop should run fast
-        self.shared_parameters = False # True
-        self.use_edge = use_edge
-        if self.shared_parameters:
-            self.node_update = mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
-            if self.use_edge:
-                self.edge_update = mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout)
-        else:
-            # naive implementation
-            # self.node_update = nn.ModuleList([mlp(node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_nodes)])
-            # self.edge_update = nn.ModuleList([mlp(node_in_dim + node_in_dim, mlp_dims, node_out_dim, act=act, dropout=dropout) for i in range(self.num_edges)])
-            node_dims = [node_in_dim] + mlp_dims + [node_out_dim]
-            self.node_update = []
-            for i in range(len(node_dims)-1):
-                if i == len(node_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
-                else: layer_act = nn.ELU(inplace=False)
-                if i == 0: layer_dropout = dropout
-                else: layer_dropout = 0.
-                use_layer_norm=False
-                if is_q and i==0 :
-                    use_layer_norm = True
-                    layer_act = nn.Tanh()
-                self.node_update.append(VectorizedLinearLayer(self.num_nodes, node_dims[i], node_dims[i+1], 
-                                                              use_layer_norm=use_layer_norm, act=layer_act, dropout=layer_dropout))
-            self.node_update = nn.Sequential(*self.node_update)
-            if self.use_edge:
-                edge_dims = [node_in_dim*2] + mlp_dims + [node_out_dim]
-                self.edge_update = []
-                for i in range(len(edge_dims)-1):
-                    if i == len(edge_dims) - 2: layer_act = act # Follow TDMPC2, last layer use customized act
-                    else: layer_act = nn.ELU()
-                    if i == 0: layer_dropout = dropout
-                    else: layer_dropout = 0.
-                    use_layer_norm=False
-                    if is_q and i==0 :
-                        use_layer_norm = True
-                        layer_act = nn.Tanh()
-                    self.edge_update.append(VectorizedLinearLayer(self.num_edges, edge_dims[i], edge_dims[i+1], 
-                                                                use_layer_norm=use_layer_norm, act=layer_act, dropout=layer_dropout))
-                self.edge_update = nn.Sequential(*self.edge_update)
-
-        # Create fully connected graph edges
-        edge_index = torch.combinations(torch.arange(self.num_nodes), r=2).T
-        # edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)  # Add reverse edges: [2, num_edges * 2] 
-        self.edge_index = edge_index.to('cuda')
-        # self.register_buffer('edge_index', edge_index)  # TODO: Use register_buffer to move to CUDA automatically
-
-
-    def forward(self, node_features):
-        """
-        Args:
-            - node_features: [..., num_nodes, feature_dim]
-        """
-        # Reshape inputs to 3D vectors
-        raw_input_shape = node_features.shape # [..., num_nodes, input_dim]
-        node_features = node_features.view(-1, raw_input_shape[-2], raw_input_shape[-1]).contiguous() # [B, num_nodes, input_dim]
-
-        # Update node outputs
-        if self.shared_parameters:
-            node_outputs = self.node_update(node_features)
-        else:
-            node_outputs = node_features.transpose(1, 0) # [num_nodes, B, input_dim]
-            node_outputs = self.node_update(node_outputs) # [num_nodes, B, node_dim]
-            node_outputs = node_outputs.transpose(1, 0) # [B, num_nodes, node_dim]
-        # Reshape outputs back to 4D/3D vectors
-        node_outputs = node_outputs.view(*raw_input_shape[:-2], self.num_nodes, -1).contiguous() # [..., num_nodes, node_dim]
-
-        if self.use_edge:
-            # Compute edge features
-            src, dest = self.edge_index
-            edge_features = torch.cat([node_features[..., src, :], node_features[..., dest, :]], dim=-1) # [B, num_edges*2, input_dim]
-            if self.shared_parameters: 
-                edge_outputs = self.edge_update(edge_features)
-            else:
-                edge_outputs = edge_features.transpose(1, 0) # [num_edges*2, B, input_dim]
-                edge_outputs = self.edge_update(edge_outputs) # [num_edges*2, B, node_dim]
-                edge_outputs = edge_outputs.transpose(1, 0) # [B, num_edges*2, node_dim]
-            # Average i->j and j->i
-            # edge_outputs = torch.mean(edge_outputs.view(*edge_outputs.shape[:-2], self.num_edges, 2, -1), dim=-2) # [B, num_edges, input_dim]
-            # Reshape outputs back to 4D/3D vectors
-            edge_outputs = edge_outputs.view(*raw_input_shape[:-2], self.num_edges, -1).contiguous() # [..., num_edges, node_dim]
-            return node_outputs, edge_outputs
-        return node_outputs, None
-
 
 class FacMLP(nn.Module):
     """
@@ -369,3 +274,40 @@ class VectorizedLinearLayer(nn.Module):
             f"{repr_dropout}, "\
             f"{repr_ln}, "\
             f"{repr_act}"
+
+
+class AdditiveCoupling(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        # simple MLP for transformation
+        self.nn = nn.Sequential(
+            nn.Linear(dim // 2, 256),
+            nn.ReLU(),
+            nn.Linear(256, dim // 2)
+        )
+
+    def forward(self, x, reverse=False):
+        x1, x2 = x.chunk(2, dim=-1)  # split into two halves
+        if not reverse:
+            y2 = x2 + self.nn(x1)
+            return torch.cat([x1, y2], dim=-1)
+        else:
+            y2 = x2 - self.nn(x1)
+            return torch.cat([x1, y2], dim=-1)
+
+class InvertibleNN(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.layer1 = AdditiveCoupling(dim)
+        self.layer2 = AdditiveCoupling(dim)
+
+    def forward(self, x):
+        x = self.layer1(x, reverse=False)
+        x = self.layer2(x, reverse=False)
+        return x
+
+    def inverse(self, y):
+        y = self.layer2(y, reverse=True)
+        y = self.layer1(y, reverse=True)
+        return y

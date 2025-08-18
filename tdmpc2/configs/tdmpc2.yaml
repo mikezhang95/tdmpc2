@@ -1,4 +1,5 @@
 defaults:
+    - optional student_cfg: null
     - override hydra/launcher: submitit_local
 
 # environment
@@ -93,5 +94,4 @@ bin_size: ???
 compile: false
 device: cuda
 
-model_type: world_model
-fac_model: false
+model_name: tdmpc2

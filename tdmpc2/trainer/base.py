@@ -1,24 +1,27 @@
 import os 
 
 class Trainer:
-	"""Base trainer class for TD-MPC2."""
+    """Base trainer class for TD-MPC2."""
 
-	def __init__(self, cfg, env, agent, buffer, logger):
-		self.cfg = cfg
-		self.env = env
-		self.agent = agent
-		self.buffer = buffer
-		self.logger = logger
-		print('Architecture:', self.agent.model)
+    def __init__(self, cfg, env, agent, buffer, logger):
+        self.cfg = cfg
+        self.env = env
+        self.agent = agent
+        self.buffer = buffer
+        self.logger = logger
+        print('Architecture:', self.agent.model)
 
-		if os.path.exists(cfg.checkpoint):
-			self.agent.load(cfg.checkpoint)
-			print(f'Load checkpoint from {cfg.checkpoint}')
+        if os.path.exists(cfg.checkpoint):
+            self.agent.load(cfg.checkpoint)
+            print(f'Load checkpoint from {cfg.checkpoint}')
+        
+        if self.agent.student_model: 
+            print('Student Architecture:', self.agent.student_model)
 
-	def eval(self):
-		"""Evaluate a TD-MPC2 agent."""
-		raise NotImplementedError
+    def eval(self):
+        """Evaluate a TD-MPC2 agent."""
+        raise NotImplementedError
 
-	def train(self):
-		"""Train a TD-MPC2 agent."""
-		raise NotImplementedError
+    def train(self):
+        """Train a TD-MPC2 agent."""
+        raise NotImplementedError

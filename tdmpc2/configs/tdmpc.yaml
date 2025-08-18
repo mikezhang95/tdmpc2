@@ -1,4 +1,5 @@
 defaults:
+    - optional student_cfg: null
     - override hydra/launcher: submitit_local
 
 # environment
@@ -38,7 +39,7 @@ num_elites: 64
 num_pi_trajs: 24
 horizon: 3 # 5
 min_std: 0.05
-max_std: 0.05 # 2.0
+max_std: 2.0
 temperature: 0.5
 
 # actor
@@ -93,12 +94,4 @@ bin_size: ???
 compile: False
 device: cuda
 
-# distill models
-fac_model: true
-fac_reward_coef: 0.0
-fac_value_coef: 0.1
-fac_consistency_coef: 0.0
-fac_lr: 1e-4
-fac_rho: 1.0
-num_noises: 10
-std_noises: 0.2
+model_name: tdmpc
