@@ -65,7 +65,7 @@ dropout: 0.01
 simnorm_dim: 8
 
 # logging
-wandb_project: tdmpc2
+wandb_project: tdmpc-new
 wandb_entity: mikezhang95
 wandb_silent: false
 enable_wandb: true

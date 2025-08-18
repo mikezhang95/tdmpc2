@@ -3,7 +3,7 @@
 model_name: tdmpc
 num_enc_layers: 2
 enc_dim: 256
-mlp_dim: 66 # 512, 338 for 50%, 66 for 10% 
+mlp_dim: 512 # 338 for 50%, 66 for 10% 
 task_dim: 96
 num_q: 2
 latent_dim: ???
