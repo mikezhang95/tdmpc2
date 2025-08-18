@@ -27,5 +27,5 @@ python -u train.py  --config-path=./configs --config-name=tdmpc2 \
                     exp_name=${exp_name} \
                     data_dir=${PWD}/logs/${task_name} \
                     steps=1000000 \
-                    eval_episodes=1 \ 
+                    eval_episodes=1 \
                     eval_freq=100000 \
