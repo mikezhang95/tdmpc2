@@ -25,6 +25,7 @@ class MultitaskWrapper(gym.Wrapper):
 		self.action_space = gym.spaces.Box(
 			low=-1, high=1, shape=(self._action_dim,), dtype=np.float32
 		)
+
 	
 	@property
 	def task(self):
@@ -42,8 +43,10 @@ class MultitaskWrapper(gym.Wrapper):
 		return torch.from_numpy(self.action_space.sample().astype(np.float32))
 
 	def _pad_obs(self, obs):
-		if obs.shape != self._obs_shape:
-			obs = torch.cat((obs, torch.zeros(self._obs_shape[0]-obs.shape[0], dtype=obs.dtype, device=obs.device)))
+		# if obs.shape != self._obs_shape:
+		# 	obs = torch.cat((obs, torch.zeros(self._obs_shape[0]-obs.shape[0], dtype=obs.dtype, device=obs.device)))
+		if obs.shape[1] != self._obs_shape[0]:
+			obs = torch.cat((obs, torch.zeros(obs.shape[0], self._obs_shape[0]-obs.shape[1], dtype=obs.dtype, device=obs.device)), dim=-1)
 		return obs
 	
 	def reset(self, task_idx=-1):
@@ -53,5 +56,5 @@ class MultitaskWrapper(gym.Wrapper):
 		return self._pad_obs(self.env.reset())
 
 	def step(self, action):
-		obs, reward, done, info = self.env.step(action[:self.env.action_space.shape[0]])
+		obs, reward, done, info = self.env.step(action[:, :self.env.action_space.shape[0]])
 		return self._pad_obs(obs), reward, done, info

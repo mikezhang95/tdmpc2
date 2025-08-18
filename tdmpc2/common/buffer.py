@@ -137,7 +137,19 @@ class Buffer():
         storage = LazyTensorStorage(self._capacity, device=self._storage_device)
         self._buffer = self._reserve_buffer(storage)
         self._buffer.load_state_dict(load_data['buffer_state'])
-        print(f"Buffer loaded from {path}")
+        print(f"Buffer {self._num_eps} loaded from {path}")
+
+    def load_multitask(self, td):
+        num_new_eps = len(td)
+        episode_idx = torch.arange(self._num_eps, self._num_eps+num_new_eps, dtype=torch.int64)
+        td['episode'] = episode_idx.unsqueeze(-1).expand(-1, td['reward'].shape[1])
+        if self._num_eps == 0:
+            self._buffer = self._init(td[0])
+        td = td.reshape(td.shape[0]*td.shape[1])
+        self._buffer.extend(td)
+        self._num_eps += num_new_eps
+        return self._num_eps
+
 
         # # M: prioritized replay buffer
         # print(f"Prioritize Buffer by rewards")
