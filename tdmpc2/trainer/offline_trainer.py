@@ -31,6 +31,7 @@ class OfflineTrainer(Trainer):
     def eval(self):
         """Evaluate a TD-MPC2 agent."""
         results = dict()
+        avg_ep_reward = []
         for task_idx in tqdm(range(len(self.cfg.tasks)), desc='Evaluating'):
             ep_rewards, ep_successes = [], []
             for _ in range(self.cfg.eval_episodes // self.cfg.num_envs):
@@ -44,9 +45,10 @@ class OfflineTrainer(Trainer):
                 ep_rewards.append(ep_reward)
                 ep_successes.append(info['success'])
             results.update({
-                f'episode_reward': torch.cat(ep_rewards).mean(), # for logger save working
                 f'episode_reward+{self.cfg.tasks[task_idx]}': torch.cat(ep_rewards).mean(),
                 f'episode_success+{self.cfg.tasks[task_idx]}': torch.cat(ep_successes).mean(),})
+            avg_ep_reward.append(torch.cat(ep_rewards).mean())
+        results['episode_reward'] = torch.cat(avg_ep_reward).mean()
         return results
 
     def train(self):
