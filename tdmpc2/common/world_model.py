@@ -3,6 +3,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tensordict.nn import TensorDictParams
 # import monotonicnetworks as lmn
 
@@ -371,43 +372,96 @@ class FacTOLD(WorldModel):
         repr += "Learnable parameters: {:,}".format(self.total_params)
         return repr
 
+# TAP
+class TAPTOLD(TOLD):
+    """
+    Factored TD-MPC1 implicit world model architecture.
+    Can be used for both single-task and multi-task experiments.
+    """
+    def __init__(self, cfg, is_student=False):
 
-# class FacActTOLD(FacTOLD):
-#     """Task-Oriented Latent Dynamics (TOLD) model used in TD-MPC."""
-#     def __init__(self, cfg):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.raw_action_dim = cfg.action_dim
+        self.latent_action_dim = cfg.latent_action_dim
 
-#         nn.Module.__init__(self)
+        self.is_student = is_student
+        if is_student:
+            self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.enc_dim, cfg.latent_dim)
+            self.num_agents = 1
+            self.action_dim_agent = cfg.latent_action_dim
+            self.latent_dim_agent = cfg.latent_dim
+        else:
+            self._encoder = tdmpc_utils.enc(cfg)
+            self._pi = layers.mlp(cfg.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.latent_action_dim)
 
-#         self.num_agents = cfg.num_agents # number of agents
-#         self.action_dim_agent = cfg.action_dim // self.num_agents
-#         self.latent_dim_agent = 50 # cfg.latent_dim
-#         self.cfg = cfg
+        self._dynamics = tdmpc_utils.mlp(cfg.latent_dim+cfg.latent_action_dim, cfg.mlp_dim, cfg.latent_dim)
+        self._reward = tdmpc_utils.mlp(cfg.latent_dim+cfg.latent_action_dim, cfg.mlp_dim, 1)
+        cfg.action_dim = cfg.latent_action_dim
+        self._Qs = layers.Ensemble([tdmpc_utils.q(cfg) for _ in range(cfg.num_q)])
+        cfg.action_dim = self.raw_action_dim
 
-#         # modules
-#         # Baseline: encode from z or obs
-#         self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.enc_dim, self.latent_dim_agent*self.num_agents)
-#         self._action_encoder = tdmpc_utils.mlp(cfg.action_dim, cfg.enc_dim, self.action_dim_agent*self.num_agents)
-#         # self._action_inn = tdmpc_utils.InvertibleNN(cfg.action_dim)
+        # VAE for actions
+        # Encoder: q(u | a, s0)
+        self._action_encoder = nn.Sequential(
+            nn.Linear(cfg.latent_dim + cfg.horizon*self.raw_action_dim, cfg.mlp_dim),
+            nn.ReLU(),
+            nn.Linear(cfg.mlp_dim, cfg.mlp_dim),
+            nn.ReLU(),
+        )
+        self._fc_mu = nn.Linear(cfg.mlp_dim, cfg.horizon*self.latent_action_dim)
+        self._fc_logvar = nn.Linear(cfg.mlp_dim, cfg.horizon*self.latent_action_dim)
+        # Decoder: p(a | u, s0)
+        self._action_decoder = nn.Sequential(
+            nn.Linear(cfg.latent_dim+cfg.horizon*self.latent_action_dim, cfg.mlp_dim),
+            nn.ReLU(),
+            nn.Linear(cfg.mlp_dim, cfg.mlp_dim),
+            nn.ReLU(),
+            nn.Linear(cfg.mlp_dim, cfg.horizon*self.raw_action_dim)
+        )
+        # .......
 
-#         self._dynamics = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], self.latent_dim_agent) 
-#         self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], 1)
-#         self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], 1, is_q=True) for _ in range(cfg.num_q)])
+        self.apply(tdmpc_utils.orthogonal_init)
+        init.zero_([self._reward[-1].weight, self._Qs.params["5", "weight"]])
+        init.zero_([self._reward[-1].bias, self._Qs.params["5", "bias"]])
 
-#         # init values
-#         self.apply(tdmpc_utils.orthogonal_init)
-#         init.zero_([self._reward.node_update[-1].weight, self._Qs.params["node_update", "2", "weight"]])
-#         init.zero_([self._reward.node_update[-1].bias, self._Qs.params["node_update", "2", "bias"]])
+        if not is_student:
+            self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
+            self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
+            self.init() # target Q
+    
+    def encode_action(self, s0, actions):
+        """
+        s0: [B, state_dim]
+        actions: [B, H, action_dim]
+        """
+        x = torch.cat([s0, actions.reshape(actions.size(0), -1)], dim=-1)
+        h = self._action_encoder(x)
+        mu = self._fc_mu(h).view(-1, self.cfg.horizon, self.latent_action_dim)
+        logvar = self._fc_logvar(h).view(-1, self.cfg.horizon, self.latent_action_dim)
+        return mu, logvar
 
-#     # Currently still plan in the original action space, but first map to some latent actions...
-#     def _generate_node_features(self, z, a):
-#         """
-#         Concat state and action for nodes
-#         """
-#         a = self._action_encoder(a) # [..., action_dim_agent*num_agents]
-#         latent_node = torch.reshape(z, (*z.shape[:-1], self.num_agents, self.latent_dim_agent))
-#         action_node = torch.reshape(a, (*a.shape[:-1], self.num_agents, self.action_dim_agent))
-#         node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_agents, node_dim]
-#         return node_features
+    def decode_action(self, s0, latents):
+        """
+        s0: [B, state_dim]
+        latents: [B, H, latent_dim]
+        returns: actions [B, H, action_dim]
+        """
+        B = s0.size(0)
+        x = torch.cat([s0, latents.view(B, -1)], dim=-1)
+        actions = self._action_decoder(x)
+        return actions.view(B, self.cfg.horizon, self.raw_action_dim)
+
+    def _reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, s0, actions):
+        mu, logvar = self.encode_action(s0, actions)
+        z = self._reparameterize(mu, logvar)
+        recon = self.decode_action(s0, z)
+        return recon, mu, logvar, z
 
 
 # class FacWorldModel(WorldModel):

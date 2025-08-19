@@ -118,3 +118,11 @@ def softmax_distillation_loss(q_student: torch.Tensor, q_teacher: torch.Tensor, 
     # KL divergence per sample
     loss = F.kl_div(log_probs_student, probs_teacher, reduction='batchmean')
     return loss
+
+def vae_loss(recon, raw, mu, logvar):
+    # Reconstruction loss (MSE)
+    recon_loss = F.mse_loss(recon, raw, reduction='mean')
+    # KL divergence
+    kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    return recon_loss + kl_loss
+
