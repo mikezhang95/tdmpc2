@@ -47,7 +47,7 @@ class OfflineTrainer(Trainer):
             results.update({
                 f'episode_reward+{self.cfg.tasks[task_idx]}': torch.cat(ep_rewards).mean(),
                 f'episode_success+{self.cfg.tasks[task_idx]}': torch.cat(ep_successes).mean(),})
-            avg_ep_reward.append(torch.cat(ep_rewards).mean())
+            avg_ep_reward.append(torch.cat(ep_rewards).mean(dim=0, keepdim=True))
         results['episode_reward'] = torch.cat(avg_ep_reward).mean()
         return results
 
@@ -68,12 +68,13 @@ class OfflineTrainer(Trainer):
             # Create buffer for sampling
             _cfg = deepcopy(self.cfg)
             _cfg.episode_length = 101 if self.cfg.task == 'mt80' else 501
-            _cfg.buffer_size = 550_450_000 if self.cfg.task == 'mt80' else 345_690_000
+            _cfg.buffer_size = 550_450_000 if self.cfg.task == 'mt80' else int(345_690_000 * _cfg.data_ratio)
             _cfg.steps = _cfg.buffer_size
             self.buffer = Buffer(_cfg)
 
             for fp in tqdm(fps, desc='Loading data'):
                 td = torch.load(fp, weights_only=False)
+                td = td[::int(1/_cfg.data_ratio),:] # M: select 1/10 data for GPU friendly
                 assert td.shape[1] == _cfg.episode_length, \
                     f'Expected episode length {td.shape[1]} to match config episode length {_cfg.episode_length}, ' \
                     f'please double-check your config.'

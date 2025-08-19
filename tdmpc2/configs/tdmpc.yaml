@@ -95,3 +95,4 @@ compile: False
 device: cuda
 
 model_name: tdmpc
+data_ratio: 1.0

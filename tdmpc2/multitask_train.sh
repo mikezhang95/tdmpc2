@@ -29,3 +29,4 @@ python -u train.py  --config-path=./configs --config-name=tdmpc2 \
                     steps=1000000 \
                     eval_episodes=1 \
                     eval_freq=100000 \
+		    data_ratio=0.1 \
