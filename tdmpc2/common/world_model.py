@@ -103,6 +103,11 @@ class WorldModel(nn.Module):
                 emb = emb.unsqueeze(1).repeat(1, x.shape[1], 1)
             else:
                 emb = emb.unsqueeze(0).repeat(x.shape[0], 1, 1)
+        elif x.ndim == 4: # for factored models
+            if emb.shape[0] == x.shape[0]:
+                emb = emb.unsqueeze(1).unsqueeze(2).repeat(1, x.shape[1], x.shape[2], 1)
+            else:
+                emb = emb.unsqueeze(0).unsqueeze(2).repeat(x.shape[0], 1, x.shape[2], 1)
         elif emb.shape[0] == 1:
             emb = emb.repeat(x.shape[0], 1)
         return torch.cat([x, emb], dim=-1)
@@ -248,10 +253,15 @@ class FacTOLD(WorldModel):
         self.latent_dim_agent = cfg.latent_dim_agent # cfg.latent_dim // self.num_agents
         self.cfg = cfg
         self.is_student = is_student
-
+        if cfg.multitask:
+            self._task_emb = nn.Embedding(len(cfg.tasks), cfg.task_dim, max_norm=1)
+            self.register_buffer("_action_masks", torch.zeros(len(cfg.tasks), cfg.action_dim))
+            for i in range(len(cfg.tasks)):
+                self._action_masks[i, :cfg.action_dims[i]] = 1.
+  
         # centralized modules
         if is_student:
-            self._encoder = tdmpc_utils.mlp(cfg.latent_dim, cfg.enc_dim, self.latent_dim_agent*self.num_agents)
+            self._encoder = tdmpc_utils.mlp(cfg.latent_dim+cfg.task_dim, cfg.enc_dim, self.latent_dim_agent*self.num_agents)
             # self._encoder = tdmpc_utils.mlp(cfg.obs_shape['state'][0], cfg.enc_dim, self.latent_dim_agent*self.num_agents)
         else:
             cfg.latent_dim = self.latent_dim_agent * self.num_agents
@@ -260,9 +270,9 @@ class FacTOLD(WorldModel):
 
         # factored modules
         mlp_dim_agent = max(cfg.mlp_dim // self.num_agents, 50)
-        self._dynamics = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[mlp_dim_agent], self.latent_dim_agent) 
-        self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[mlp_dim_agent], 1)
-        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent, 2*[cfg.mlp_dim//self.num_agents], 1, is_q=True) for _ in range(cfg.num_q)])
+        self._dynamics = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent+cfg.task_dim, 2*[mlp_dim_agent], self.latent_dim_agent) 
+        self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent+cfg.task_dim, 2*[mlp_dim_agent], 1)
+        self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent+cfg.task_dim, 2*[cfg.mlp_dim//self.num_agents], 1, is_q=True) for _ in range(cfg.num_q)])
 
         # MC: mixing network
         # === LMN ===
@@ -293,20 +303,24 @@ class FacTOLD(WorldModel):
             self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
             self.init() # target Q
  
-    def _generate_node_features(self, z, a):
+    def _generate_node_features(self, z, a, task):
         """
         Concat state and action for nodes
         """
         latent_node = torch.reshape(z, (*z.shape[:-1], self.num_agents, self.latent_dim_agent))
         action_node = torch.reshape(a, (*a.shape[:-1], self.num_agents, self.action_dim_agent))
         node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_agents, node_dim]
+        if self.cfg.multitask:
+            node_features = self.task_emb(node_features, task)
         return node_features
 
-    def encode(self, obs, task=None):
+    def encode(self, obs, task):
         """
         Encodes an observation into its latent representation.
         This implementation assumes a single state-based observation.
         """
+        if self.cfg.multitask:
+            obs = self.task_emb(obs, task)
         return self._encoder(obs)
 
     def next(self, z, a, task):
@@ -316,7 +330,7 @@ class FacTOLD(WorldModel):
             - z: [*, hidden_dim] * might be 1 or 2 dims
             - a: [*, action_dim] 
         """
-        node_features = self._generate_node_features(z, a)
+        node_features = self._generate_node_features(z, a, task)
         x = self._dynamics(node_features) # [*, num_agents, hidden_dim_agent]
         x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim_agent * num_agents]
         return x
@@ -325,7 +339,7 @@ class FacTOLD(WorldModel):
         """
         Predicts instantaneous (single-step) reward.
         """
-        node_features = self._generate_node_features(z, a)
+        node_features = self._generate_node_features(z, a, task)
         reward_nodes = self._reward(node_features)  # [*, num_agents, num_bins], [*, num_edges, num_bins]
         if return_individual:
             return reward_nodes
@@ -347,7 +361,7 @@ class FacTOLD(WorldModel):
         qnet = self._Qs
 
         # M: generate qvalues
-        node_features = self._generate_node_features(z, a)
+        node_features = self._generate_node_features(z, a, task)
         value_nodes = qnet(node_features)  # [num_q, *, num_agents, num_bins], [num_q, *, num_edges, num_bins]
         if return_individual:
             out = value_nodes

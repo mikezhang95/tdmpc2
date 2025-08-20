@@ -3,13 +3,14 @@
 model_name: tap_tdmpc
 num_enc_layers: 2
 enc_dim: 256
-mlp_dim: 512 # 338 for 50%, 66 for 10% 
 task_dim: 96
 num_q: 2
-latent_action_dim: 3
+latent_action_dim: 2
+mlp_dim: 256 # 512
 latent_dim: ???
 action_dim: ???
 multitask: ???
+tasks: ???
 # obs_shapes: ???
 # action_dims: ???
 num_bins: 0
@@ -32,7 +33,7 @@ batch_size: 512 # 256 when imitating tdmpc2
 reward_coef: 0.5
 value_coef: 0.1
 consistency_coef: 0.0
-vae_coef: 1.0
+vae_coef: 0.01
 lr: 1e-4
 grad_clip_norm: 10
 rho: 0.5

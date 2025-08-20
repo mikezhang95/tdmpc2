@@ -39,10 +39,9 @@ class TDMPC2(torch.nn.Module):
             ], lr=self.cfg.lr, capturable=True)
 
         if hasattr(cfg, 'student_cfg'):
-            cfg.student_cfg.action_dim = cfg.action_dim
-            cfg.student_cfg.latent_dim = cfg.latent_dim
-            cfg.student_cfg.multitask = cfg.multitask
             self.student_cfg = cfg.student_cfg
+            cfg.student_cfg.action_dim = cfg.action_dim
+            cfg.student_cfg.action_dims = cfg.action_dims
             if cfg.student_cfg.model_name == 'tdmpc':
                 self.student_model = TOLD(cfg.student_cfg, is_student=True).to(self.device) # TDMPC
             elif cfg.student_cfg.model_name == 'fac_tdmpc':
@@ -73,7 +72,10 @@ class TDMPC2(torch.nn.Module):
         self.discount = torch.tensor(
             [self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device=self.device
         ) if self.cfg.multitask else self._get_discount(cfg.episode_length)
-        self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.num_envs, self.cfg.horizon, self.cfg.action_dim, device=self.device))
+        if hasattr(self.cfg, 'student_cfg') and 'tap' in self.cfg.student_cfg.model_name:
+            self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.num_envs, self.cfg.horizon, self.cfg.student_cfg.latent_action_dim, device=self.device))
+        else:
+            self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.num_envs, self.cfg.horizon, self.cfg.action_dim, device=self.device))
         if cfg.compile:
             print('Compiling update function with torch.compile...')
             self._update = torch.compile(self._update, mode="reduce-overhead")
@@ -216,8 +218,6 @@ z (torch.Tensor): Latent state from which to plan.
             _, _, _, pi_actions = model.forward(z.repeat(cfg.num_pi_trajs, 1), pi_actions) # [B*NPI, H, LA]
             pi_actions = pi_actions.view(self.cfg.num_envs, cfg.num_pi_trajs, cfg.horizon, cfg.latent_action_dim).transpose(1, 2) # [B, H, NPI, LA]
             action_dim = cfg.latent_action_dim
-            if t0:
-                self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.num_envs, cfg.horizon, action_dim, device=self.device))
         else:
             action_dim = cfg.action_dim
         num_agents = cfg.num_agents if hasattr(cfg, 'num_agents') else 1
@@ -404,24 +404,24 @@ z (torch.Tensor): Latent state from which to plan.
             num_noises, std_noises = self.student_cfg.num_noises, self.student_cfg.std_noises
 
             # sampled actions
-            r = torch.randn(self.student_cfg.horizon, self.student_cfg.batch_size, num_noises, self.student_cfg.action_dim, device=action.device)
+            r = torch.randn(self.student_cfg.horizon, self.cfg.batch_size, num_noises, self.student_cfg.action_dim, device=action.device)
             action_sample = action.unsqueeze(2) + std_noises * r # [H, BS, NS, A]
             student_action_sample = action_sample.clone()
             # sampled zs
-            student_z = self.student_model.encode(zs[0].clone().detach()).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS]
-            # student_z = self.student_model.encode(obs[0].clone().detach()).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS] # encode from obs
-            student_zs = torch.empty(self.student_cfg.horizon+1, self.student_cfg.batch_size, num_noises, self.student_model.latent_dim_agent * self.student_model.num_agents, device=self.device) # [H, BS, NS, FS]
+            student_z = self.student_model.encode(zs[0].clone().detach(), task).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS]
+            # student_z = self.student_model.encode(obs[0].clone().detach(), task).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS] # encode from obs
+            student_zs = torch.empty(self.student_cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_model.latent_dim_agent * self.student_model.num_agents, device=self.device) # [H, BS, NS, FS]
             student_zs[0] = student_z
-            student_zs_sp = torch.empty(self.student_cfg.horizon+1, self.student_cfg.batch_size, num_noises, self.student_model.latent_dim_agent * self.student_model.num_agents, device=self.device) # [H, BS, NS, FS]
+            student_zs_sp = torch.empty(self.student_cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_model.latent_dim_agent * self.student_model.num_agents, device=self.device) # [H, BS, NS, FS]
             student_zs_sp[0] = student_z.detach() # self_predictive
             global_z = zs[0].clone().detach().unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, S]
-            global_zs = torch.empty(self.student_cfg.horizon+1, self.student_cfg.batch_size, num_noises, self.student_cfg.latent_dim, device=self.device) # [H, BS, NS, S]
+            global_zs = torch.empty(self.student_cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_cfg.latent_dim, device=self.device) # [H, BS, NS, S]
             global_zs[0] = global_z 
 
             # vae loss for latent actions
             if 'tap' in self.student_cfg.model_name:
                 raw_action_clone = student_action_sample.clone().view(self.student_cfg.horizon, -1, self.student_cfg.action_dim).transpose(0, 1) # [BS*NS, H, A]
-                recon_action_sample, mu, logvar, latent_action_sample = self.student_model.forward(student_z.view(self.student_cfg.batch_size*num_noises, -1), raw_action_clone)
+                recon_action_sample, mu, logvar, latent_action_sample = self.student_model.forward(student_z.view(self.cfg.batch_size*num_noises, -1), raw_action_clone)
                 vae_loss = math.vae_loss(recon_action_sample, raw_action_clone, mu, logvar)
                 student_action_sample = latent_action_sample.transpose(0, 1).view(self.student_cfg.horizon, -1, num_noises, self.student_model.latent_action_dim) # [H, BS, NS, LA]
             else:
@@ -434,7 +434,7 @@ z (torch.Tensor): Latent state from which to plan.
                 student_zs[t+1] = student_z
                 global_z = self.model.next(global_z, _action, task).detach()
                 global_zs[t+1] = global_z
-                student_z_sp = self.student_model.encode(global_z).detach()
+                student_z_sp = self.student_model.encode(global_z, task).detach()
                 student_zs_sp[t+1] = student_z_sp
                 student_consistency_loss = student_consistency_loss + F.mse_loss(student_z, student_z_sp) * self.student_cfg.rho**t
 
@@ -443,7 +443,9 @@ z (torch.Tensor): Latent state from which to plan.
             _zs_sample = global_zs[:-1]
             _zs_sample = _zs_sample.view(self.student_cfg.horizon, -1, self.student_cfg.latent_dim) # [H, BS*NS, S]
             action_sample = action_sample.view(self.student_cfg.horizon, -1, self.student_cfg.action_dim) # [H, BS*NS, A]
-            student_action_sample = student_action_sample.view(self.student_cfg.horizon, self.student_cfg.batch_size*num_noises, -1) # [H, BS*NS, A]
+            student_action_sample = student_action_sample.view(self.student_cfg.horizon, self.cfg.batch_size*num_noises, -1) # [H, BS*NS, A]
+            if task is not None:
+                task = task.unsqueeze(-1).repeat(1, num_noises).view(-1) # [BS*NS]
 
             # MC: monotonic on which functions
             # ====== c1: monotonic R/Q ====== # 
@@ -457,14 +459,14 @@ z (torch.Tensor): Latent state from which to plan.
             for t, (pred_rew_unbind, rew_unbind, pred_qs_unbind, qs_unbind) in enumerate(zip(student_rewards.unbind(0), target_rewards.unbind(0), student_qs.unbind(1), target_qs.unbind(0))):
                 # MC: mse loss or kl loss
                 # student_reward_loss = student_reward_loss + math.soft_ce(pred_rew_unbind, rew_unbind, self.student_cfg).mean() * self.student_cfg.student_rho**t
-                pred_rew_unbind = pred_rew_unbind.view(self.student_cfg.batch_size, num_noises)
+                pred_rew_unbind = pred_rew_unbind.view(self.cfg.batch_size, num_noises)
                 rew_unbind = math.two_hot_inv(rew_unbind, self.cfg) # expert models
-                rew_unbind = rew_unbind.view(self.student_cfg.batch_size, num_noises)
+                rew_unbind = rew_unbind.view(self.cfg.batch_size, num_noises)
                 student_reward_loss = student_reward_loss + math.softmax_distillation_loss(pred_rew_unbind, rew_unbind, self.student_cfg.temperature).mean() * self.student_cfg.rho**t
                 for _, pred_qs_unbind_unbind in enumerate(pred_qs_unbind.unbind(0)):
                     # student_value_loss = student_value_loss + math.soft_ce(pred_qs_unbind_unbind, qs_unbind, self.cfg).mean() * self.cfg.student_rho**t
-                    pred_qs_unbind_unbind = pred_qs_unbind_unbind.view(self.student_cfg.batch_size, num_noises)
-                    qs_unbind = qs_unbind.view(self.student_cfg.batch_size, num_noises)
+                    pred_qs_unbind_unbind = pred_qs_unbind_unbind.view(self.cfg.batch_size, num_noises)
+                    qs_unbind = qs_unbind.view(self.cfg.batch_size, num_noises)
                     student_value_loss = student_value_loss + math.softmax_distillation_loss(pred_qs_unbind_unbind, qs_unbind, self.student_cfg.temperature).mean() * self.student_cfg.rho**t
             # ============ # 
 

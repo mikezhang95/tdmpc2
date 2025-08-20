@@ -20,13 +20,20 @@ export CUDA_VISIBLE_DEVICES=0
 
 # offline training
 task_name=mt30 # 6
-exp_name=offline-tdmpc2
+
+num_agents=6
+exp_name=il-fac_N6
 
 python -u train.py  --config-path=./configs --config-name=tdmpc2 \
                     task=${task_name} \
                     exp_name=${exp_name} \
                     data_dir=${PWD}/logs/${task_name} \
+                    checkpoint=${PWD}/logs/${task_name}/1/offline-tdmpc2/models/final.pt \
                     steps=1000000 \
                     eval_episodes=1 \
                     eval_freq=100000 \
-		    data_ratio=0.1 \
+                    data_ratio=0.5 \
+                    lr=0.0 \
+                    compile=true \
+                    student_cfg=fac_tdmpc \
+                    student_cfg.num_agents=${num_agents} \
