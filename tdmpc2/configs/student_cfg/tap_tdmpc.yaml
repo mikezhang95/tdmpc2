@@ -33,9 +33,10 @@ batch_size: 512 # 256 when imitating tdmpc2
 reward_coef: 0.5
 value_coef: 0.1
 consistency_coef: 0.0
-vae_coef: 0.01
+vae_coef: 0.05
 lr: 1e-4
 grad_clip_norm: 10
 rho: 0.5
 num_noises: 10
 std_noises: 0.5
+temperature_noises: 0.5

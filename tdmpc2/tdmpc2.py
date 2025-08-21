@@ -462,12 +462,12 @@ z (torch.Tensor): Latent state from which to plan.
                 pred_rew_unbind = pred_rew_unbind.view(self.cfg.batch_size, num_noises)
                 rew_unbind = math.two_hot_inv(rew_unbind, self.cfg) # expert models
                 rew_unbind = rew_unbind.view(self.cfg.batch_size, num_noises)
-                student_reward_loss = student_reward_loss + math.softmax_distillation_loss(pred_rew_unbind, rew_unbind, self.student_cfg.temperature).mean() * self.student_cfg.rho**t
+                student_reward_loss = student_reward_loss + math.softmax_distillation_loss(pred_rew_unbind, rew_unbind, self.student_cfg.temperature_noise).mean() * self.student_cfg.rho**t
                 for _, pred_qs_unbind_unbind in enumerate(pred_qs_unbind.unbind(0)):
                     # student_value_loss = student_value_loss + math.soft_ce(pred_qs_unbind_unbind, qs_unbind, self.cfg).mean() * self.cfg.student_rho**t
                     pred_qs_unbind_unbind = pred_qs_unbind_unbind.view(self.cfg.batch_size, num_noises)
                     qs_unbind = qs_unbind.view(self.cfg.batch_size, num_noises)
-                    student_value_loss = student_value_loss + math.softmax_distillation_loss(pred_qs_unbind_unbind, qs_unbind, self.student_cfg.temperature).mean() * self.student_cfg.rho**t
+                    student_value_loss = student_value_loss + math.softmax_distillation_loss(pred_qs_unbind_unbind, qs_unbind, self.student_cfg.temperature_noise).mean() * self.student_cfg.rho**t
             # ============ # 
 
             # # ==== c2: monotonic Return ==== # 

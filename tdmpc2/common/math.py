@@ -109,7 +109,7 @@ def softmax_distillation_loss(q_student: torch.Tensor, q_teacher: torch.Tensor, 
     """
     # Soften Q-values
     q_t = q_teacher / temperature
-    q_s = q_student / temperature
+    q_s = q_student # / temperature
 
     # Convert to log probabilities
     log_probs_student = F.log_softmax(q_s, dim=-1)        # [B, A]

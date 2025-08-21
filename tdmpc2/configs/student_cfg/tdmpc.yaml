@@ -37,3 +37,4 @@ grad_clip_norm: 10
 rho: 0.5
 num_noises: 10
 std_noises: 0.5
+temperature_noises: 0.5
