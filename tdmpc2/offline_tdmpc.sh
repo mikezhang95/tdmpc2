@@ -46,5 +46,5 @@ python -u train.py  --config-path=./configs --config-name=tdmpc \
                     compile=true \
                     student_cfg=tdmpc \
                     # student_cfg.mlp_dim=66 \
-                    # student_cfg.temperature_noise=0.01 \
+                    # student_cfg.temperature_noises=0.01 \
 
