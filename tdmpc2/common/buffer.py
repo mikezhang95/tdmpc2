@@ -1,12 +1,9 @@
 import os
 import torch
 from tensordict.tensordict import TensorDict
-from torchrl.data.replay_buffers import ReplayBuffer, LazyTensorStorage
+from torchrl.data.replay_buffers import ReplayBuffer, LazyTensorStorage, TensorStorage
 from torchrl.data.replay_buffers.samplers import SliceSampler
-
-# # M: prioritized replay buffer
-# from torchrl.data.replay_buffers.samplers import PrioritizedSliceSampler
-# from tqdm import tqdm
+from tqdm import tqdm
 
 
 class Buffer():
@@ -28,19 +25,6 @@ class Buffer():
         )
         self._batch_size = cfg.batch_size * (cfg.horizon+1)
         self._num_eps = 0
-
-        # # M: prioritized replay buffer
-        # self._sampler = PrioritizedSliceSampler(
-        #     num_slices=self.cfg.batch_size, 
-        #     end_key=None,
-        #      traj_key='episode',
-        #      truncated_key=None,
-        #      strict_length=True,
-        #     max_capacity=cfg.buffer_size,  # self._capacity
-        #     alpha=0.7,
-        #     beta=0.9,
-        #     eps=1e-6,
-        # )
 
     @property
     def capacity(self):
@@ -137,7 +121,7 @@ class Buffer():
         storage = LazyTensorStorage(self._capacity, device=self._storage_device)
         self._buffer = self._reserve_buffer(storage)
         self._buffer.load_state_dict(load_data['buffer_state'])
-        print(f"Buffer {self._num_eps} loaded from {path}")
+        print(f"Load {self._num_eps} episodes from {path}")
 
     def load_multitask(self, td):
         num_new_eps = len(td)
@@ -150,13 +134,66 @@ class Buffer():
         self._num_eps += num_new_eps
         return self._num_eps
 
+    def materialize_buffer(self):
+        """Convert LazyTensorStorage to TensorStorage for faster sampling.
 
-        # # M: prioritized replay buffer
-        # print(f"Prioritize Buffer by rewards")
-        # priority = torch.ones(len(self._buffer))
-        # self._buffer.update_priority(torch.arange(len(self._buffer)), priority)
-        # storage = self._buffer._storage[:len(self._buffer)]
-        # for i in tqdm(range(len(storage))):
-        #     priority = torch.exp(torch.clamp(1-storage[i]['reward'], 1e-6, 1.0))
-        #     priority[torch.isnan(priority)] = 1e-6
-        #     self._buffer.update_priority(i, priority)
+        This function:
+        1. Builds a prototype TensorDict whose batch dimension is [capacity]
+            (so TensorStorage can infer the correct storage shape).
+        2. Initializes a TensorStorage with that prototype.
+        3. Copies all existing samples from the old buffer into the new storage.
+        """
+        if not hasattr(self, "_buffer"):
+            raise RuntimeError("Buffer not initialized. Load or add episodes first.")
+
+        old_storage = self._buffer._storage
+        # Use exact type check to avoid inheritance confusion
+        if type(old_storage) is TensorStorage:
+            print("Buffer is already materialized (TensorStorage).")
+            return
+
+        print("Materializing buffer: copying from LazyTensorStorage to TensorStorage...")
+        # Grab one sample to infer field shapes and dtypes
+        example_td = self._buffer[0]
+        if not isinstance(example_td, TensorDict):
+            raise RuntimeError("Unexpected sample type when materializing buffer.")
+
+        # Filter nan rewards/actions, the first transition in episode
+        n_items = len(self._buffer)  # number of stored elements
+        real_n_items = n_items - self._num_eps
+        
+        # Build prototype fields with batch dim = capacity
+        prototype_fields = {}
+        for k, v in example_td.items():
+            # v is a tensor like shape [12] (action) or [] (scalar)
+            # target prototype shape: (capacity, *v.shape)
+            target_shape = (real_n_items,) + tuple(v.shape)
+            # create zeros on the target device with same dtype
+            prototype_fields[k] = torch.zeros(
+                target_shape, dtype=v.dtype, device=self._storage_device
+            )
+
+        # Prototype TensorDict has batch_size = [capacity]
+        prototype_td = TensorDict(prototype_fields, batch_size=[real_n_items])
+
+        # Create TensorStorage with prototype and max_size = capacity
+        storage = TensorStorage(prototype_td, device=self._storage_device, max_size=real_n_items)
+
+        # Copy all samples from old buffer into new storage
+        cursor = 0
+        for i in tqdm(range(n_items)):
+            sample_td = self._buffer[i]  # this is a TensorDict with batch_size=[]
+            # Skip invalid transitions (first step of each episode)
+            if torch.isnan(sample_td["reward"]).any() or torch.isnan(sample_td["action"]).any():
+                continue
+            # build a batched one-element TensorDict for assignment
+            batched = {}
+            for k, v in sample_td.items():
+                # ensure shape is [1, *field_shape]
+                batched[k] = v.unsqueeze(0).to(self._storage_device)
+            storage[cursor] = TensorDict(batched, batch_size=[1])
+            cursor += 1
+
+        # create a new ReplayBuffer that wraps the storage
+        self._buffer = self._reserve_buffer(storage)
+        print(f"Materialization complete: copied {real_n_items}/{n_items} entries into TensorStorage.")

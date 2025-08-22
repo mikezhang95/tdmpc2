@@ -82,9 +82,13 @@ class OfflineTrainer(Trainer):
             expected_episodes = _cfg.buffer_size // _cfg.episode_length
             assert self.buffer.num_eps == expected_episodes, \
                 f'Buffer has {self.buffer.num_eps} episodes, expected {expected_episodes} episodes.'
+            # TODO: buffer is still LazyTensorStorage (sample costs large CPU)
         else:
-            self.buffer = Buffer(self.cfg)
-            self.buffer.load(self.cfg.data_dir)
+            _cfg = deepcopy(self.cfg)
+            _cfg.steps = _cfg.buffer_size
+            self.buffer = Buffer(_cfg)
+            self.buffer.load(_cfg.data_dir)
+            self.buffer.materialize_buffer()
         
         best_episode_reward = 0.0
         print(f'Training agent for {self.cfg.steps} iterations...')
