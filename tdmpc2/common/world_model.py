@@ -358,7 +358,16 @@ class FacTOLD(WorldModel):
         `target` specifies whether to use the target Q-networks or not.
         """
         assert return_type in {'min', 'avg', 'all'}
-        qnet = self._Qs
+
+        if self.is_student:
+            qnet = self._Qs
+        else:
+            if target:
+                qnet = self._target_Qs
+            elif detach:
+                qnet = self._detach_Qs
+            else:
+                qnet = self._Qs
 
         # M: generate qvalues
         node_features = self._generate_node_features(z, a, task)
