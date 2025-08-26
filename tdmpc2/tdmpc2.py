@@ -285,7 +285,7 @@ z (torch.Tensor): Latent state from which to plan.
         return action.clamp(-1, 1)
             
             
-    def update_pi(self, zs, task):
+    def update_pi(self, zs, actions, task):
         """
         Update policy using a sequence of latent states.
 
@@ -296,7 +296,7 @@ z (torch.Tensor): Latent state from which to plan.
         Returns:
             float: Loss of the policy update.
         """
-        _, pis, log_pis, _ = self.model.pi(zs, task)
+        mus, pis, log_pis, log_stds = self.model.pi(zs, task)
         qs = self.model.Q(zs, pis, task, return_type='avg', detach=True)
         self.scale.update(qs[0]) # normalize qs, speedup training \pi
         qs = self.scale(qs)
@@ -304,6 +304,15 @@ z (torch.Tensor): Latent state from which to plan.
         # Loss is a weighted sum of Q-values
         rho = torch.pow(self.cfg.rho, torch.arange(len(qs), device=self.device))
         pi_loss = ((self.cfg.entropy_coef * log_pis - qs).mean(dim=(1,2)) * rho).mean()
+
+        # M: BC loss
+        if hasattr(self.cfg, 'bc_coef') and self.cfg.bc_coef > 0.0:
+            mus = mus[:-1].view(-1, actions.shape[-1])
+            log_stds = log_stds[:-1].view(-1, actions.shape[-1])
+            actions = actions.view(-1, actions.shape[-1])
+            bc_loss = math.bc_loss(mus, log_stds, actions)
+            pi_loss += bc_loss.mean() * self.cfg.bc_coef
+
         pi_loss.backward()
         pi_grad_norm = torch.nn.utils.clip_grad_norm_(self.model._pi.parameters(), self.cfg.grad_clip_norm)
         self.pi_optim.step()
@@ -376,7 +385,7 @@ z (torch.Tensor): Latent state from which to plan.
         self.optim.zero_grad(set_to_none=True)
 
         # Update policy
-        pi_loss, pi_grad_norm = self.update_pi(zs.detach(), task)
+        pi_loss, pi_grad_norm = self.update_pi(zs.detach(), action, task)
 
         # Update target Q-functions
         self.model.soft_update_target_Q()

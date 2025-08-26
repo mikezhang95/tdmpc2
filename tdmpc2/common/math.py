@@ -126,3 +126,29 @@ def vae_loss(recon, raw, mu, logvar):
     kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + kl_loss
 
+
+def bc_loss(mu, log_std, gt_actions):
+    """
+    Imitation loss for Gaussian policy.
+    Args:
+        mu:        (batch, action_dim) predicted mean
+        log_std:   (batch, action_dim) predicted log standard deviation
+        gt_actions:(batch, action_dim) ground truth actions
+    Returns:
+        scalar loss (negative log likelihood)
+    """
+    std = torch.exp(log_std)
+    var = std ** 2
+
+    # Log-prob under Gaussian
+    log_prob = -0.5 * (
+        ((gt_actions - mu) ** 2) / var
+        + 2 * log_std
+        + torch.log(torch.ones_like(mu) * 2.0 * torch.pi)
+    )
+
+    # Sum over action dimensions, mean over batch
+    log_prob = log_prob.sum(dim=-1)  
+    loss = -log_prob.mean()
+
+    return loss
