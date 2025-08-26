@@ -344,7 +344,11 @@ class FacTOLD(WorldModel):
         if return_individual:
             return reward_nodes
         else:
-            total_reward = torch.mean(reward_nodes, dim=-2)
+            if self.cfg.multitask:
+                action_mask = self._action_masks[task].unsqueeze(0).unsqueeze(-1)
+                total_reward = torch.mean(reward_nodes * action_mask, dim=-2) / torch.mean(action_mask, dim=-2)
+            else:
+                total_reward = torch.mean(reward_nodes, dim=-2)
             # total_reward = self._reward_mixer(reward_nodes.squeeze(-1)).unsqueeze(-1)
             return total_reward
 
@@ -375,7 +379,11 @@ class FacTOLD(WorldModel):
         if return_individual:
             out = value_nodes
         else:
-            out = torch.mean(value_nodes, dim=-2)
+            if self.cfg.multitask:
+                action_mask = self._action_masks[task].unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+                out = torch.mean(value_nodes * action_mask, dim=-2) / torch.mean(action_mask, dim=-2)
+            else:
+                out = torch.mean(value_nodes, dim=-2)
             # out = self._value_mixer(value_nodes.squeeze(-1)).unsqueeze(-1)
 
         if return_type == 'all':
