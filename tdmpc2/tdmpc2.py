@@ -28,6 +28,8 @@ class TDMPC2(torch.nn.Module):
             self.model = TOLD(cfg).to(self.device) # TDMPC
         elif cfg.model_name == 'fac_tdmpc':
             self.model = FacTOLD(cfg).to(self.device) # Fac-TDMPC
+        elif cfg.model_name == 'tap_tdmpc':
+            self.model = TAPTOLD(cfg).to(self.device) # Fac-TDMPC
         else:
             self.model = WorldModel(cfg).to(self.device) # TDMPC2
         self.optim = torch.optim.Adam([
@@ -310,7 +312,8 @@ z (torch.Tensor): Latent state from which to plan.
             mus = mus[:-1].view(-1, actions.shape[-1])
             log_stds = log_stds[:-1].view(-1, actions.shape[-1])
             actions = actions.view(-1, actions.shape[-1])
-            bc_loss = math.bc_loss(mus, log_stds, actions)
+            # bc_loss = math.bc_loss(mus, log_stds, actions) # -log \pi(a'|s)
+            bc_loss = ((mus - actions.detach())**2).sum(-1).mean() #  (mu(s) - a')^2
             pi_loss += bc_loss.mean() * self.cfg.bc_coef
 
         pi_loss.backward()
@@ -459,24 +462,28 @@ z (torch.Tensor): Latent state from which to plan.
             # MC: monotonic on which functions
             # ====== c1: monotonic R/Q ====== # 
             student_rewards = self.student_model.reward(_student_zs_sample, student_action_sample, task) # [H, BS*NS, 1]
-            student_qs = self.student_model.Q(_student_zs_sample, student_action_sample, task, return_type='all') # [Q, HS, BS*NS, 1]
-            target_rewards = self.model.reward(_zs_sample, action_sample, task).detach() # [H, BS*NS, 1]
+            student_qs = self.student_model.Q(_student_zs_sample, student_action_sample, task, return_type='all') # [Q, H, BS*NS, 1]
+            target_rewards = self.model.reward(_zs_sample, action_sample, task).detach() # [H, BS*NS, num_bins]
             target_qs = self.model.Q(_zs_sample, action_sample, task, return_type='avg', detach=True).detach() # [H, BS*NS, 1]
             
             # Compute losses
             student_reward_loss, student_value_loss = 0, 0
             for t, (pred_rew_unbind, rew_unbind, pred_qs_unbind, qs_unbind) in enumerate(zip(student_rewards.unbind(0), target_rewards.unbind(0), student_qs.unbind(1), target_qs.unbind(0))):
-                # MC: mse loss or kl loss
-                # student_reward_loss = student_reward_loss + math.soft_ce(pred_rew_unbind, rew_unbind, self.student_cfg).mean() * self.student_cfg.student_rho**t
-                pred_rew_unbind = pred_rew_unbind.view(self.cfg.batch_size, num_noises)
                 rew_unbind = math.two_hot_inv(rew_unbind, self.cfg) # expert models
-                rew_unbind = rew_unbind.view(self.cfg.batch_size, num_noises)
-                student_reward_loss = student_reward_loss + math.softmax_distillation_loss(pred_rew_unbind, rew_unbind, self.student_cfg.temperature_noises).mean() * self.student_cfg.rho**t
+                # MC: mse loss or kl loss
+                if self.student_cfg.loss_type == 'mse':
+                    student_reward_loss = student_reward_loss + math.soft_ce(pred_rew_unbind, rew_unbind, self.student_cfg).mean() * self.student_cfg.rho**t
+                else:
+                    pred_rew_unbind = pred_rew_unbind.view(self.cfg.batch_size, num_noises)
+                    rew_unbind = rew_unbind.view(self.cfg.batch_size, num_noises)
+                    student_reward_loss = student_reward_loss + math.softmax_distillation_loss(pred_rew_unbind, rew_unbind, self.student_cfg.temperature_noises).mean() * self.student_cfg.rho**t
                 for _, pred_qs_unbind_unbind in enumerate(pred_qs_unbind.unbind(0)):
-                    # student_value_loss = student_value_loss + math.soft_ce(pred_qs_unbind_unbind, qs_unbind, self.cfg).mean() * self.cfg.student_rho**t
-                    pred_qs_unbind_unbind = pred_qs_unbind_unbind.view(self.cfg.batch_size, num_noises)
-                    qs_unbind = qs_unbind.view(self.cfg.batch_size, num_noises)
-                    student_value_loss = student_value_loss + math.softmax_distillation_loss(pred_qs_unbind_unbind, qs_unbind, self.student_cfg.temperature_noises).mean() * self.student_cfg.rho**t
+                    if self.student_cfg.loss_type == 'mse':
+                        student_value_loss = student_value_loss + math.soft_ce(pred_qs_unbind_unbind, qs_unbind, self.student_cfg).mean() * self.student_cfg.rho**t
+                    else:
+                        pred_qs_unbind_unbind = pred_qs_unbind_unbind.view(self.cfg.batch_size, num_noises)
+                        qs_unbind = qs_unbind.view(self.cfg.batch_size, num_noises)
+                        student_value_loss = student_value_loss + math.softmax_distillation_loss(pred_qs_unbind_unbind, qs_unbind, self.student_cfg.temperature_noises).mean() * self.student_cfg.rho**t
             # ============ # 
 
             # # ==== c2: monotonic Return ==== # 
