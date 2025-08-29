@@ -18,13 +18,20 @@ echo "Seed $seed"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
-task_name=cheetah-run
-exp_name=online-tdmpc
+# num_agents=6
+# task_name=walker-run
+# num_agents=12
+# task_name=quadruped-run
+num_agents=21
+task_name=humanoid-walk
+exp_name=online-tdmpc-pd0
 
-python -u train.py --config-path=./configs --config-name=tdmpc \
+python -u train.py --config-path=./configs --config-name=tdmpc2 \
                 exp_name=${exp_name} \
                 task=${task_name} \
                 num_envs=4 \
                 steps_per_update=4 \
                 compile=True \
+                # student_cfg=fac_tdmpc \
+                # student_cfg.num_agents=${num_agents} \
 

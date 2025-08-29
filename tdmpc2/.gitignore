@@ -2,3 +2,4 @@
 logs*
 log
 configs_backup
+notebooks/*

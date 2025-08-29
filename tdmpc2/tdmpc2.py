@@ -198,7 +198,7 @@ z (torch.Tensor): Latent state from which to plan.
         z = self.model.encode(obs, task)
         raw_z = z.clone()
         # Define preliminaries
-        if self.student_model: 
+        if self.student_model and eval_mode: 
             z = self.student_model.encode(z, task)
             # z = self.student_model.encode(obs, task)
             cfg, model = self.student_cfg, self.student_model
@@ -411,6 +411,8 @@ z (torch.Tensor): Latent state from which to plan.
             
             # Prepare for update
             self.student_model.train()
+            zs = zs.detach()
+            action = action.detach()
 
             # sampled parameters
             num_noises, std_noises = self.student_cfg.num_noises, self.student_cfg.std_noises
