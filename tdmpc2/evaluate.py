@@ -97,7 +97,7 @@ def evaluate(cfg: dict):
 		std_ep_rewards = np.std(ep_rewards)
 		std_ep_successes = np.std(ep_successes)
 		if cfg.multitask:
-			scores.append(ep_successes*100 if task.startswith('mw-') else ep_rewards/10)
+			scores.append(avg_ep_successes*100 if task.startswith('mw-') else avg_ep_rewards/10)
 		print(colored(f'  {task:<22}' \
 			f'\tR: {avg_ep_rewards:.01f} \pm {std_ep_rewards:.01f} ' \
 			f'\tS: {avg_ep_successes:.02f} \pm {std_ep_successes:.02f}', 'yellow'))

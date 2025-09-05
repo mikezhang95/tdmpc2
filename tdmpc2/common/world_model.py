@@ -72,7 +72,8 @@ class WorldModel(nn.Module):
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        self.init()
+        if not self.is_student:
+            self.init() 
         return self
 
     def train(self, mode=True): 
@@ -302,7 +303,7 @@ class FacTOLD(WorldModel):
             self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
             self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
             self.init() # target Q
- 
+
     def _generate_node_features(self, z, a, task):
         """
         Concat state and action for nodes
