@@ -541,6 +541,9 @@ class LaLQR(WorldModel):
         if 'fixed' in self.cfg.dynamic_structure:
             A.requires_grad = False
             B.requires_grad = False
+        else:
+            torch.nn.init.trunc_normal_(A, std=1.0) 
+            torch.nn.init.trunc_normal_(B, std=1.0)
         self._dynamics = torch.nn.ParameterList([A, B])
 
         # === cost functions ===
@@ -552,9 +555,11 @@ class LaLQR(WorldModel):
             Q = torch.nn.Parameter(torch.randn(self.latent_dim, self.latent_dim))
         if 'fixed' in self.cfg.cost_structure:
             Q.requires_grad = False
+        else:
+            torch.nn.init.trunc_normal_(Q, std=1.0)
         # M: R is not used in current setups
+        # R = torch.nn.Parameter(torch.randn(cfg.action_dim, cfg.action_dim))
         R = torch.nn.Parameter(0.001*torch.eye(cfg.action_dim), requires_grad=False) 
-        # R = torch.nn.Parameter(torch.randn(cfg.action_dim, cfg.action_dim), requires_grad=False) 
         self._reward = nn.ParameterList([Q, R])
 
         # === value functions === (M: not used in control since LQR is infinite horizon)
