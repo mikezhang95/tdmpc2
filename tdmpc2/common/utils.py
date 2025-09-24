@@ -3,6 +3,7 @@ import time
 import functools
 import numpy as np
 import torch
+import random
 
 is_cuda = torch.cuda.is_available()
 
@@ -38,3 +39,24 @@ def benchmark_torch_function(runs=10):
 
         return wrapper
     return decorator
+
+def set_seed_everywhere(seed):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+def np_to_torch(t, device='cpu'):
+    if t is None:
+        return None
+    else:
+        return torch.Tensor(t).to(device).float()
+
+def torch_to_np(t):
+    if t is None:
+        return None
+    elif t.nelement() == 0:
+        return np.array([])
+    else:
+        return t.cpu().detach().numpy()

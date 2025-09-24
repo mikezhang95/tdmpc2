@@ -5,10 +5,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tensordict.nn import TensorDictParams
+import control
 # import monotonicnetworks as lmn
 
 from common import layers, math, init
-from common.utils import benchmark_torch_function
+from common.utils import benchmark_torch_function, np_to_torch
 from common import tdmpc_utils # tdmpc-1 utils
 
 # TDMPC2
@@ -81,7 +82,7 @@ class WorldModel(nn.Module):
         Overriding `train` method to keep target Q-networks in eval mode.
         """
         super().train(mode)
-        self._target_Qs.train(False)
+        if hasattr(self, '_target_Qs'): self._target_Qs.train(False)
         return self
 
     def soft_update_target_Q(self):
@@ -185,12 +186,15 @@ class WorldModel(nn.Module):
             z = self.task_emb(z, task)
 
         z = torch.cat([z, a], dim=-1)
-        if target:
-            qnet = self._target_Qs
-        elif detach:
-            qnet = self._detach_Qs
-        else:
+        if self.is_student:
             qnet = self._Qs
+        else:
+            if target:
+                qnet = self._target_Qs
+            elif detach:
+                qnet = self._detach_Qs
+            else:
+                qnet = self._Qs
         out = qnet(z)
 
         if return_type == 'all':
@@ -495,6 +499,165 @@ class TAPTOLD(TOLD):
         recon = self.decode_action(s0, z)
         return recon, mu, logvar, z
 
+
+# LaLQR
+class LaLQR(WorldModel):
+    """
+    Factored TD-MPC1 implicit world model architecture.
+    Can be used for both single-task and multi-task experiments.
+    """
+    def __init__(self, cfg, is_student=False):
+
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.is_student = is_student
+
+        self.action_dim = cfg.action_dim
+        self.raw_latent_dim = cfg.latent_dim
+        self.latent_dim = cfg.latent_dim_internal // cfg.action_dim * cfg.action_dim # TODO: better way to split contraollability indices
+        # for compatibility
+        self.latent_dim_agent = self.latent_dim
+        self.num_agents = 1
+
+        if is_student:
+            self._encoder = layers.mlp(self.raw_latent_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim)
+        else:
+            self._encoder = layers.mlp(cfg.obs_shape['state'][0] + cfg.task_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim)
+            self._pi = layers.mlp(self.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim) # - Kx
+
+        if self.cfg.dynamic_structure == 'companion_fixed':
+            self._action_encoder = layers.ConditionalInvertibleLinear(self.latent_dim, self.action_dim)
+        
+        # === linear transition ====
+        if 'companion' in self.cfg.dynamic_structure:
+            A = torch.nn.Parameter(torch.zeros(self.action_dim, self.latent_dim)) # [n_u, n_z]
+            B = torch.nn.Parameter(torch.zeros(self.action_dim*(self.action_dim-1)//2)) # [n_u*(n_u-1)//2]
+        elif 'diag' in self.cfg.dynamic_structure:
+            A = torch.nn.Parameter(torch.ones((self.latent_dim))) # [n_z] diagonal values
+            self.B = torch.nn.Parameter(torch.randn((self.latent_dim, self.action_dim))) # [n_z, n_u]
+        else: # full matrix
+            A = torch.nn.Parameter(torch.randn(self.latent_dim, self.latent_dim)) # [n_z, n_z]
+            B = torch.nn.Parameter(torch.randn(self.latent_dim, self.action_dim)) # [n_z, n_u]
+        if 'fixed' in self.cfg.dynamic_structure:
+            A.requires_grad = False
+            B.requires_grad = False
+        self._dynamics = torch.nn.ParameterList([A, B])
+
+        # === cost functions ===
+        if 'diag' in self.cfg.cost_structure:
+            Q = torch.nn.Parameter(torch.ones(self.latent_dim))
+        elif 'psd' in self.cfg.cost_structure:
+            Q = torch.nn.Parameter(torch.randn(self.latent_dim, self.latent_dim))
+        else: 
+            Q = torch.nn.Parameter(torch.randn(self.latent_dim, self.latent_dim))
+        if 'fixed' in self.cfg.cost_structure:
+            Q.requires_grad = False
+        # M: R is not used in current setups
+        R = torch.nn.Parameter(0.001*torch.eye(cfg.action_dim), requires_grad=False) 
+        # R = torch.nn.Parameter(torch.randn(cfg.action_dim, cfg.action_dim), requires_grad=False) 
+        self._reward = nn.ParameterList([Q, R])
+
+        # === value functions === (M: not used in control since LQR is infinite horizon)
+        self._Qs = layers.Ensemble([layers.mlp(self.latent_dim + self.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
+        self.apply(init.weight_init)
+        init.zero_([self._Qs.params["2", "weight"]])
+
+        if not is_student:
+            self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
+            self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
+            self.init() # target Q
+        self.K = torch.zeros(self.action_dim, self.latent_dim)
+
+    def get_lqr_matrics(self, to_numpy=False, device='cuda'):
+
+        hidden_dim, action_dim = self.latent_dim, self.action_dim
+
+        A, B = self._dynamics
+        new_A, new_B = A, B
+        if 'companion' in self.cfg.dynamic_structure:
+            raw_dim = hidden_dim // action_dim
+            new_A = torch.zeros((hidden_dim, hidden_dim), device=device)
+            new_B = torch.zeros((hidden_dim, action_dim), device=device)
+            b_id = 0
+            for i in range(action_dim):
+                new_A[range(i*raw_dim, (i+1)*raw_dim-1), range(i*raw_dim+1, (i+1)*raw_dim)] = 1.0 
+                new_A[(i+1)*raw_dim-1, :] = A[i]
+                new_B[(i+1)*raw_dim-1, i] = 1.0
+                new_B[(i+1)*raw_dim-1, i+1:] = B[b_id:b_id+action_dim-i-1]
+                b_id += action_dim-i-1
+        elif 'diag' in self.cfg.dynamic_structure:
+            new_A = torch.zeros((hidden_dim, hidden_dim), device=device)
+            new_A[range(hidden_dim), range(hidden_dim)] = A
+        
+        Q, R = self._reward
+        new_Q, new_R = Q, R
+        if 'psd' in self.cfg.cost_structure:
+            new_Q = torch.matmul(Q, Q.t()) + torch.eye(hidden_dim).to(device)
+        elif 'diag' in self.cfg.cost_structure:
+            new_Q = torch.zeros((hidden_dim, hidden_dim), device=device)
+            new_Q[range(hidden_dim), range(hidden_dim)] = Q * Q
+
+        if to_numpy:
+            new_A = new_A.data.cpu().numpy()
+            new_B = new_B.data.cpu().numpy()
+            new_Q = new_Q.data.cpu().numpy()
+            new_R = new_R.data.cpu().numpy()
+            return new_A, new_B, new_Q, new_R
+        return new_A, new_B, new_Q, new_R
+
+    def encode(self, obs, task):
+        return self._encoder(obs)
+
+    def next(self, z, a, task):
+        """
+        Predicts the next latent state given the current latent state and action.
+        Args:
+            - z: [*, hidden_dim] * might be 1 or 2 dims
+            - a: [*, action_dim] 
+        """
+        if self.cfg.dynamic_structure == 'companion_fixed':
+            a = self._action_encoder(z, a)
+        A, B, _, _ = self.get_lqr_matrics(device=z.device)
+        # next_z = z @ A.T + a @ B.T
+        next_z = torch.einsum('...d,nd->...n', z, A) + torch.einsum('...m,nm->...n', a, B)
+        return next_z
+
+    def reward(self, z, a, task, return_individual=False):
+        """
+        Predicts instantaneous (single-step) reward.
+        """
+        if self.cfg.dynamic_structure == 'companion_fixed':
+            a = self._action_encoder(z, a)
+        _, _, Q, R = self.get_lqr_matrics(device=z.device)
+        next_z = self.next(z, a, task)
+        # M: the cost_z is on next state
+        # cost_z = (torch.matmul(torch.matmul(next_z, Q.T), torch.transpose(next_z, -1, -2))).diagonal(dim1=-2, dim2=-1).unsqueeze(-1)
+        # cost_a = (torch.matmul(torch.matmul(a, R.T), torch.transpose(a, -1, -2))).diagonal(dim1=-2, dim2=-1).unsqueeze(-1)
+        cost_z = torch.einsum('...i,ij,...j->...', next_z, Q, next_z).unsqueeze(-1)
+        cost_a = torch.einsum('...i,ij,...j->...', a, R, a).unsqueeze(-1)
+        reward = - cost_z - cost_a
+        return reward
+
+    def __repr__(self):
+        repr = 'LaLQR\n'
+        modules = ['Encoder', 'Dynamics', 'Reward', 'Q-functions']
+        for i, m in enumerate([self._encoder, self._dynamics, self._reward, self._Qs]):
+            repr += f"{modules[i]}: {m}\n"
+        repr += "Learnable parameters: {:,}".format(self.total_params)
+        return repr
+    
+    def act(self, z, refresh=False):
+        if refresh:
+            try: 
+                A, B, Q, R = self.get_lqr_matrics(to_numpy=True, transpose=False)
+                K, S, E = control.dlqr(A, B, Q, R)
+                self.K = np_to_torch(K, device=z.device)
+            except Exception as e:
+                print(f'Calculating K errors: {e}')
+        u = - torch.matmul(z, self.K.transpose(1, 0))
+        if self.cfg.dynamic_structure == 'companion_fixed':
+            u = self._action_encoder.inverse(z, u)
+        return u
 
 # class FacWorldModel(WorldModel):
 #     """

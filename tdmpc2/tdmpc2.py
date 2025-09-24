@@ -9,7 +9,7 @@ from common.scale import RunningScale
 from common.layers import api_model_conversion
 from common.world_model import WorldModel
 from common.world_model import TOLD, FacTOLD
-from common.world_model import TAPTOLD
+from common.world_model import TAPTOLD, LaLQR
 # from common.world_model import FacWorldModel
 
 
@@ -30,6 +30,8 @@ class TDMPC2(torch.nn.Module):
             self.model = FacTOLD(cfg).to(self.device) # Fac-TDMPC
         elif cfg.model_name == 'tap_tdmpc':
             self.model = TAPTOLD(cfg).to(self.device) # Fac-TDMPC
+        elif cfg.model_name == 'lalqr':
+            self.model = LaLQR(cfg).to(self.device) # Fac-TDMPC
         else:
             self.model = WorldModel(cfg).to(self.device) # TDMPC2
         self.optim = torch.optim.Adam([
@@ -44,12 +46,15 @@ class TDMPC2(torch.nn.Module):
             self.student_cfg = cfg.student_cfg
             cfg.student_cfg.action_dim = cfg.action_dim
             cfg.student_cfg.action_dims = cfg.action_dims
+            cfg.student_cfg.num_envs = cfg.num_envs
             if cfg.student_cfg.model_name == 'tdmpc':
                 self.student_model = TOLD(cfg.student_cfg, is_student=True).to(self.device) # TDMPC
             elif cfg.student_cfg.model_name == 'fac_tdmpc':
                 self.student_model = FacTOLD(cfg.student_cfg, is_student=True).to(self.device) # Fac-TDMPC
             elif cfg.student_cfg.model_name == 'tap_tdmpc':
                 self.student_model = TAPTOLD(cfg.student_cfg, is_student=True).to(self.device) # TAP-TDMPC
+            elif cfg.student_cfg.model_name == 'lalqr':
+                self.student_model = LaLQR(cfg.student_cfg, is_student=True).to(self.device) # TAP-TDMPC
             else:
                 raise NotImplementedError
             self.student_optim = torch.optim.Adam([
@@ -74,13 +79,17 @@ class TDMPC2(torch.nn.Module):
         self.discount = torch.tensor(
             [self._get_discount(ep_len) for ep_len in cfg.episode_lengths], device=self.device
         ) if self.cfg.multitask else self._get_discount(cfg.episode_length)
-        if hasattr(self.cfg, 'student_cfg') and 'tap' in self.cfg.student_cfg.model_name:
-            self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.num_envs, self.cfg.horizon, self.cfg.student_cfg.latent_action_dim, device=self.device))
-        else:
-            self._prev_mean = torch.nn.Buffer(torch.zeros(self.cfg.num_envs, self.cfg.horizon, self.cfg.action_dim, device=self.device))
         if cfg.compile:
             print('Compiling update function with torch.compile...')
             self._update = torch.compile(self._update, mode="reduce-overhead")
+        if hasattr(self.cfg, 'student_cfg'):
+            cfg = self.cfg.student_cfg
+        else: 
+            cfg = self.cfg
+        if 'tap' in cfg.model_name:
+            self._prev_mean = torch.nn.Buffer(torch.zeros(cfg.num_envs, cfg.horizon, cfg.latent_action_dim, device=self.device))
+        else:
+            self._prev_mean = torch.nn.Buffer(torch.zeros(cfg.num_envs, cfg.horizon, cfg.action_dim, device=self.device))
 
     @property
     def plan(self):
@@ -204,6 +213,11 @@ z (torch.Tensor): Latent state from which to plan.
             cfg, model = self.student_cfg, self.student_model
         else:
             cfg, model = self.cfg, self.model
+        
+        # # LQR
+        # if 'lqr'in cfg.model_name:
+        #     action = model.act(z, refresh=t0)
+        #     return action.clamp(-1, 1)
 
         # Sample policy trajectories
         if cfg.num_pi_trajs > 0:
