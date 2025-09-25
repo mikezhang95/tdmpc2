@@ -20,18 +20,17 @@ export CUDA_VISIBLE_DEVICES=0
 
 # 1. online training: see online_train.sh
 
-# 2. imitation learning, train fac model
-num_agents=6
-task_name=walker-run # 6
-exp_name=il-fac_N${num_agents}
+# 2. imitation learning
+task_name=walker-run
+exp_name=offline-lalqr-dyn_comp-cost_psd
 
-python -u train.py  --config-path=./configs --config-name=tdmpc \
+python -u train.py  --config-path=./configs --config-name=lalqr \
                     task=${task_name} \
                     exp_name=${exp_name} \
                     data_dir=${PWD}/logs/${task_name}/1/online-tdmpc/buffer.pt \
-                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc/models/final.pt \
                     steps=500000 \
-                    lr=0.0 \
+                    enable_wandb=true \
                     compile=true \
-                    student_cfg=fac_tdmpc \
-                    student_cfg.num_agents=${num_agents} \
+                    wandb_project=lalqr \
+                    cost_structure=psd \
+                    dynamic_structure=companion \

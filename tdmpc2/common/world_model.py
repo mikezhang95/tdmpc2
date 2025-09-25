@@ -654,12 +654,13 @@ class LaLQR(WorldModel):
     def act(self, z, refresh=False):
         if refresh:
             try: 
-                A, B, Q, R = self.get_lqr_matrics(to_numpy=True, transpose=False)
+                A, B, Q, R = self.get_lqr_matrics(to_numpy=True)
                 K, S, E = control.dlqr(A, B, Q, R)
                 self.K = np_to_torch(K, device=z.device)
             except Exception as e:
                 print(f'Calculating K errors: {e}')
-        u = - torch.matmul(z, self.K.transpose(1, 0))
+        K_T = self.K.T.to(z.device) 
+        u = - torch.matmul(z, K_T)
         if self.cfg.dynamic_structure == 'companion_fixed':
             u = self._action_encoder.inverse(z, u)
         return u

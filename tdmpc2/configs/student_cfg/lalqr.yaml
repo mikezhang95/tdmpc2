@@ -33,7 +33,7 @@ temperature: 0.5
 # training 
 batch_size: 512 # 256 when imitating tdmpc2
 reward_coef: 0.1
-value_coef: 0.1
+value_coef: 0.0 # 0.1
 consistency_coef: 20
 lr: 1e-3
 grad_clip_norm: 20

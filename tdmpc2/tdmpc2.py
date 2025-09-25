@@ -214,10 +214,10 @@ z (torch.Tensor): Latent state from which to plan.
         else:
             cfg, model = self.cfg, self.model
         
-        # # LQR
-        # if 'lqr'in cfg.model_name:
-        #     action = model.act(z, refresh=t0)
-        #     return action.clamp(-1, 1)
+        # LQR
+        if 'lqr'in cfg.model_name:
+            action = model.act(z, refresh=t0)
+            return action.clamp(-1, 1)
 
         # Sample policy trajectories
         if cfg.num_pi_trajs > 0:
@@ -432,26 +432,26 @@ z (torch.Tensor): Latent state from which to plan.
             num_noises, std_noises = self.student_cfg.num_noises, self.student_cfg.std_noises
 
             # sampled actions
-            r = torch.randn(self.student_cfg.horizon, self.cfg.batch_size, num_noises, self.student_cfg.action_dim, device=action.device)
+            r = torch.randn(self.cfg.horizon, self.cfg.batch_size, num_noises, self.student_cfg.action_dim, device=action.device)
             action_sample = action.unsqueeze(2) + std_noises * r # [H, BS, NS, A]
             student_action_sample = action_sample.clone()
             # sampled zs
             student_z = self.student_model.encode(zs[0].clone().detach(), task).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS]
             # student_z = self.student_model.encode(obs[0].clone().detach(), task).unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, FS] # encode from obs
-            student_zs = torch.empty(self.student_cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_model.latent_dim_agent * self.student_model.num_agents, device=self.device) # [H, BS, NS, FS]
+            student_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_model.latent_dim_agent * self.student_model.num_agents, device=self.device) # [H, BS, NS, FS]
             student_zs[0] = student_z
-            student_zs_sp = torch.empty(self.student_cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_model.latent_dim_agent * self.student_model.num_agents, device=self.device) # [H, BS, NS, FS]
+            student_zs_sp = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_model.latent_dim_agent * self.student_model.num_agents, device=self.device) # [H, BS, NS, FS]
             student_zs_sp[0] = student_z.detach() # self_predictive
             global_z = zs[0].clone().detach().unsqueeze(1).repeat(1, num_noises, 1) # [BS, NS, S]
-            global_zs = torch.empty(self.student_cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_cfg.latent_dim, device=self.device) # [H, BS, NS, S]
+            global_zs = torch.empty(self.cfg.horizon+1, self.cfg.batch_size, num_noises, self.student_cfg.latent_dim, device=self.device) # [H, BS, NS, S]
             global_zs[0] = global_z 
 
             # vae loss for latent actions
             if 'tap' in self.student_cfg.model_name:
-                raw_action_clone = student_action_sample.clone().view(self.student_cfg.horizon, -1, self.student_cfg.action_dim).transpose(0, 1) # [BS*NS, H, A]
+                raw_action_clone = student_action_sample.clone().view(self.cfg.horizon, -1, self.student_cfg.action_dim).transpose(0, 1) # [BS*NS, H, A]
                 recon_action_sample, mu, logvar, latent_action_sample = self.student_model.forward(student_z.view(self.cfg.batch_size*num_noises, -1), raw_action_clone)
                 vae_loss = math.vae_loss(recon_action_sample, raw_action_clone, mu, logvar)
-                student_action_sample = latent_action_sample.transpose(0, 1).view(self.student_cfg.horizon, -1, num_noises, self.student_model.latent_action_dim) # [H, BS, NS, LA]
+                student_action_sample = latent_action_sample.transpose(0, 1).view(self.cfg.horizon, -1, num_noises, self.student_model.latent_action_dim) # [H, BS, NS, LA]
             else:
                 vae_loss = None
 

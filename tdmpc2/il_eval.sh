@@ -18,26 +18,16 @@ echo "Seed $seed"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 
-# 1. online training: see online_train.sh:w
+num_agents=6
+task_name=walker-run # 6
+exp_name=il-lalqr
 
-# 2. imitation learning
-task_name=walker-run
-# exp_name=il-lalqr-dyn_comp_fix-cost_diag_fix
-exp_name=il-lalqr-dyn_comp-cost_psd
-
-python -u train.py  --config-path=./configs --config-name=tdmpc \
-                    task=${task_name} \
-                    exp_name=${exp_name} \
-                    data_dir=${PWD}/logs/${task_name}/1/online-tdmpc/buffer.pt \
-                    checkpoint=${PWD}/logs/${task_name}/1/online-tdmpc/models/final.pt \
-                    steps=500000 \
-                    lr=0.0 \
-                    seed=${seed} \
-                    enable_wandb=true \
-                    compile=true \
-                    wandb_project=lalqr \
-                    student_cfg=lalqr \
-                    student_cfg.cost_structure=psd \
-                    student_cfg.dynamic_structure=companion \
+python -u evaluate.py  --config-path=./configs --config-name=tdmpc \
+                        task=${task_name} \
+                        exp_name=${exp_name} \
+                        checkpoint=${PWD}/logs/${task_name}/1/${exp_name}/models/best.pt \
+                        eval_episodes=1 \
+                        student_cfg=lalqr \
+                        student_cfg.horizon=3 \
 
 

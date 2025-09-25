@@ -17,7 +17,7 @@ steps: 10_000_00 # 10_000_000
 batch_size: 512
 steps_per_update: 1
 reward_coef: 0.1
-value_coef: 0.1
+value_coef: 0.0 # 0.1
 consistency_coef: 20
 rho: 0.5
 lr: 3e-4
@@ -48,7 +48,7 @@ log_std_max: 2
 entropy_coef: 1e-4
 
 # critic
-num_bins: 101
+num_bins: 0
 vmin: -10
 vmax: +10
 
@@ -58,8 +58,8 @@ num_enc_layers: 3
 enc_dim: 512
 num_channels: 32
 mlp_dim: 512
-latent_dim: 100
-latent_dim_agent: 100
+latent_dim: 120
+latent_dim_internal: 120
 task_dim: 96
 num_q: 5
 dropout: 0.01
@@ -94,6 +94,9 @@ bin_size: ???
 # speedups
 compile: false
 device: cuda
+data_ratio: 1.0
 
 model_name: lalqr 
-data_ratio: 1.0
+dynamic_structure: full
+cost_structure: full
+
