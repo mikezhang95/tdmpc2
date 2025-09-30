@@ -12,7 +12,7 @@ multitask: ???
 tasks: ???
 # obs_shapes: ???
 # action_dims: ???
-num_bins: 0
+num_bins: 1
 vmin: -10
 vmax: +10
 

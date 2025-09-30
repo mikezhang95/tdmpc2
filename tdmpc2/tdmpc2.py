@@ -39,6 +39,10 @@ class TDMPC2(torch.nn.Module):
             {'params': self.model._dynamics.parameters()},
             {'params': self.model._reward.parameters()},
             {'params': self.model._Qs.parameters()},
+            {'params': self.model._reward_mixer.parameters() if hasattr(self.model, '_reward_mixer') else []},
+            {'params': self.model._value_mixer.parameters() if hasattr(self.model, '_value_mixer') else []},
+            {'params': self.model._action_encoder.parameters() if hasattr(self.model, '_action_encoder') else []},
+            {'params': self.model._action_decoder.parameters() if hasattr(self.model, '_action_decoder') else []},
             {'params': self.model._task_emb.parameters() if self.cfg.multitask else []}
             ], lr=self.cfg.lr, capturable=True)
 

@@ -573,15 +573,17 @@ class ConditionalInvertibleLinear(nn.Module):
     def forward(self, x, u):
         batch = x.size(0)
         out = self.hyper(x)
-        M = out[:, :self.dim_u*self.dim_u].view(batch, self.dim_u, self.dim_u)
-        b = out[:, self.dim_u*self.dim_u:]
+        M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
+        b = out[..., self.dim_u*self.dim_u:]
         W = torch.matrix_exp(M)
-        return torch.bmm(u.unsqueeze(1), W.transpose(1,2)).squeeze(1) + b
+        v = torch.einsum('...i,...ij->...j', u, W) + b
+        return v 
 
     def inverse(self, x, v):
         batch = x.size(0)
         out = self.hyper(x)
-        M = out[:, :self.dim_u*self.dim_u].view(batch, self.dim_u, self.dim_u)
-        b = out[:, self.dim_u*self.dim_u:]
+        M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
+        b = out[..., self.dim_u*self.dim_u:]
         W_inv = torch.matrix_exp(-M)
-        return torch.bmm((v - b).unsqueeze(1), W_inv.transpose(1,2)).squeeze(1)
+        u = torch.einsum('...i,...ij->...j', v, W_inv) + b
+        return u

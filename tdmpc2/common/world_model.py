@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tensordict.nn import TensorDictParams
 import control
-# import monotonicnetworks as lmn
+import monotonicnetworks as lmn
 
 from common import layers, math, init
 from common.utils import benchmark_torch_function, np_to_torch
@@ -562,6 +562,9 @@ class LaLQR(WorldModel):
         R = torch.nn.Parameter(0.001*torch.eye(cfg.action_dim), requires_grad=False) 
         self._reward = nn.ParameterList([Q, R])
 
+        if 'mono' in self.cfg.cost_structure:
+            self._reward_mixer = lmn.MonotonicLayer(1, 1)
+
         # === value functions === (M: not used in control since LQR is infinite horizon)
         self._Qs = layers.Ensemble([layers.mlp(self.latent_dim + self.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
         self.apply(init.weight_init)
@@ -638,9 +641,12 @@ class LaLQR(WorldModel):
         # M: the cost_z is on next state
         # cost_z = (torch.matmul(torch.matmul(next_z, Q.T), torch.transpose(next_z, -1, -2))).diagonal(dim1=-2, dim2=-1).unsqueeze(-1)
         # cost_a = (torch.matmul(torch.matmul(a, R.T), torch.transpose(a, -1, -2))).diagonal(dim1=-2, dim2=-1).unsqueeze(-1)
-        cost_z = torch.einsum('...i,ij,...j->...', next_z, Q, next_z).unsqueeze(-1)
-        cost_a = torch.einsum('...i,ij,...j->...', a, R, a).unsqueeze(-1)
+        cost_z = torch.einsum('...i,ij,...j->...', next_z, Q, next_z).unsqueeze(-1) # / self.latent_dim / self.latent_dim
+        cost_a = torch.einsum('...i,ij,...j->...', a, R, a).unsqueeze(-1) # / self.action_dim / self.action_dim
+        # M: combined with num_bins=1 (monotonic symlog function) to match the scale with reward 
         reward = - cost_z - cost_a
+        if 'mono' in self.cfg.cost_structure:
+            reward = self._reward_mixer(reward)
         return reward
 
     def __repr__(self):

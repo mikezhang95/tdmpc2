@@ -15,7 +15,7 @@ log_std_max: 2
 entropy_coef: 1e-4
 
 # critic
-num_bins: 0
+num_bins: 1
 vmin: -10
 vmax: +10
 
