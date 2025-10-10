@@ -585,5 +585,5 @@ class ConditionalInvertibleLinear(nn.Module):
         M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
         b = out[..., self.dim_u*self.dim_u:]
         W_inv = torch.matrix_exp(-M)
-        u = torch.einsum('...i,...ij->...j', v, W_inv) + b
+        u = torch.einsum('...i,...ij->...j', v - b, W_inv)
         return u
