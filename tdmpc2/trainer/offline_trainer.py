@@ -49,6 +49,10 @@ class OfflineTrainer(Trainer):
                 f'episode_success+{self.cfg.tasks[task_idx]}': torch.cat(ep_successes).mean(),})
             avg_ep_reward.append(torch.cat(ep_rewards).mean(dim=0, keepdim=True))
         results['episode_reward'] = torch.cat(avg_ep_reward).mean()
+        if hasattr(self.agent.model, 'eigen_max'):
+            results['rank_c'] = self.agent.model.rank_c.item()
+            results['eigen_max'] = self.agent.model.eigen_max.item()
+            results['eigen_min'] = self.agent.model.eigen_min.item()
         return results
 
     def train(self):

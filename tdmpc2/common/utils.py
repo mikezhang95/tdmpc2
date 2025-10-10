@@ -51,7 +51,7 @@ def np_to_torch(t, device='cpu'):
     if t is None:
         return None
     else:
-        return torch.Tensor(t).to(device).float()
+        return torch.tensor(t).to(device).float()
 
 def torch_to_np(t):
     if t is None:

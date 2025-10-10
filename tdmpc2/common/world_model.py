@@ -574,7 +574,13 @@ class LaLQR(WorldModel):
             self.register_buffer("log_std_min", torch.tensor(cfg.log_std_min))
             self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
             self.init() # target Q
-        self.K = torch.zeros(self.action_dim, self.latent_dim)
+
+        # self.K = torch.zeros(self.action_dim, self.latent_dim)
+        self.register_buffer("K", torch.zeros(self.latent_dim, self.action_dim))
+        self.register_buffer("C", torch.zeros(self.latent_dim, self.latent_dim*self.action_dim))
+        self.register_buffer("rank_c", torch.tensor(0.0))
+        self.register_buffer("eigen_max", torch.tensor(0.0))
+        self.register_buffer("eigen_min", torch.tensor(0.0))
 
     def get_lqr_matrics(self, to_numpy=False, device='cuda'):
 
@@ -634,10 +640,12 @@ class LaLQR(WorldModel):
         """
         Predicts instantaneous (single-step) reward.
         """
-        if self.cfg.dynamic_structure == 'companion_fixed':
-            a = self._action_encoder(z, a)
-        _, _, Q, R = self.get_lqr_matrics(device=z.device)
         next_z = self.next(z, a, task)
+        # M: this is done in next
+        # if self.cfg.dynamic_structure == 'companion_fixed':
+        #     a = self._action_encoder(z, a)
+
+        _, _, Q, R = self.get_lqr_matrics(device=z.device)
         # M: the cost_z is on next state
         # cost_z = (torch.matmul(torch.matmul(next_z, Q.T), torch.transpose(next_z, -1, -2))).diagonal(dim1=-2, dim2=-1).unsqueeze(-1)
         # cost_a = (torch.matmul(torch.matmul(a, R.T), torch.transpose(a, -1, -2))).diagonal(dim1=-2, dim2=-1).unsqueeze(-1)
@@ -661,8 +669,17 @@ class LaLQR(WorldModel):
         if refresh:
             try: 
                 A, B, Q, R = self.get_lqr_matrics(to_numpy=True)
+                C = control.ctrb(A, B)
+                rank_c = np.linalg.matrix_rank(C)
                 K, S, E = control.dlqr(A, B, Q, R)
                 self.K = np_to_torch(K, device=z.device)
+                self.C = np_to_torch(C, device=z.device)
+                self.rank_c = np_to_torch(float(rank_c), device=z.device)
+                I = A - np.matmul(B, K)
+                evalues, evectors = np.linalg.eig(I) 
+                eigen_i = np.abs(evalues)
+                self.eigen_max = np_to_torch(float(np.max(eigen_i)), device=z.device)
+                self.eigen_min = np_to_torch(float(np.min(eigen_i)), device=z.device)
             except Exception as e:
                 print(f'Calculating K errors: {e}')
         K_T = self.K.T.to(z.device) 
