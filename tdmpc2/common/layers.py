@@ -560,30 +560,40 @@ class VectorizedLinearLayer(nn.Module):
 
 
 class ConditionalInvertibleLinear(nn.Module):
-    def __init__(self, dim_x, dim_u, hidden=64):
+    def __init__(self, dim_z, dim_u, hidden=64):
         super().__init__()
         self.dim_u = dim_u
         # Hypernetwork: outputs flattened M and b
-        self.hyper = nn.Sequential(
-            nn.Linear(dim_x, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, dim_u * dim_u + dim_u)
-        )
+        # self.hyper = nn.Sequential(
+        #     nn.Linear(dim_z, hidden),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden, dim_u * dim_u + dim_u)
+        # )
+        self.G = nn.Parameter(torch.zeros(dim_u, dim_u), requires_grad=True)
+        self.F = nn.Parameter(torch.zeros(dim_u, dim_z), requires_grad=True)
 
-    def forward(self, x, u):
-        batch = x.size(0)
-        out = self.hyper(x)
-        M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
-        b = out[..., self.dim_u*self.dim_u:]
-        W = torch.matrix_exp(M)
-        v = torch.einsum('...i,...ij->...j', u, W) + b
+    def forward(self, z, u):
+        # batch = x.size(0)
+        # out = self.hyper(x)
+        # M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
+        # b = out[..., self.dim_u*self.dim_u:]
+        # W = torch.matrix_exp(M)
+        # v = torch.einsum('...i,...ij->...j', u, W) + b
+        fx = torch.einsum('...n,...mn->...m', z, self.F)
+        G = 0.5 * (self.G - self.G.T) 
+        W_inv = torch.matrix_exp(-G)
+        v = torch.einsum('...n,...mn->...m', u - fx, W_inv)
         return v 
 
-    def inverse(self, x, v):
-        batch = x.size(0)
-        out = self.hyper(x)
-        M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
-        b = out[..., self.dim_u*self.dim_u:]
-        W_inv = torch.matrix_exp(-M)
-        u = torch.einsum('...i,...ij->...j', v - b, W_inv)
+    def inverse(self, z, v):
+        # batch = x.size(0)
+        # out = self.hyper(x)
+        # M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
+        # b = out[..., self.dim_u*self.dim_u:]
+        # W_inv = torch.matrix_exp(-M)
+        # u = torch.einsum('...i,...ij->...j', v - b, W_inv)
+        fx = torch.einsum('...n,mn->...m', z, self.F)
+        G = 0.5 * (self.G - self.G.T) 
+        W = torch.matrix_exp(G)
+        u = torch.einsum('...n,...mn->...m', v, W) + fx
         return u

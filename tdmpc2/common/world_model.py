@@ -582,7 +582,7 @@ class LaLQR(WorldModel):
         self.register_buffer("eigen_max", torch.tensor(0.0))
         self.register_buffer("eigen_min", torch.tensor(0.0))
 
-    def get_lqr_matrics(self, to_numpy=False, device='cuda'):
+    def get_lqr_matrics(self, to_numpy=False, device='cuda', discount=1.0):
 
         hidden_dim, action_dim = self.latent_dim, self.action_dim
 
@@ -610,6 +610,8 @@ class LaLQR(WorldModel):
         elif 'diag' in self.cfg.cost_structure:
             new_Q = torch.zeros((hidden_dim, hidden_dim), device=device)
             new_Q[range(hidden_dim), range(hidden_dim)] = Q * Q
+
+        new_A, new_R = new_A * np.sqrt(discount), new_R / discount
 
         if to_numpy:
             new_A = new_A.data.cpu().numpy()
@@ -668,7 +670,8 @@ class LaLQR(WorldModel):
     def act(self, z, refresh=False):
         if refresh:
             try: 
-                A, B, Q, R = self.get_lqr_matrics(to_numpy=True)
+                discount = 1.0 # 2.0, increase discount makes (A-BK) stable
+                A, B, Q, R = self.get_lqr_matrics(to_numpy=True, discount=discount)
                 C = control.ctrb(A, B)
                 rank_c = np.linalg.matrix_rank(C)
                 K, S, E = control.dlqr(A, B, Q, R)
@@ -682,8 +685,8 @@ class LaLQR(WorldModel):
                 self.eigen_min = np_to_torch(float(np.min(eigen_i)), device=z.device)
             except Exception as e:
                 print(f'Calculating K errors: {e}')
-        K_T = self.K.T.to(z.device) 
-        u = - torch.matmul(z, K_T)
+        K_T = self.K.T.to(z.device)  # [n_s, n_u]
+        u = - torch.matmul(z, K_T) # [B, n_s] x [n_s, n_u] = [B, n_u]
         if self.cfg.dynamic_structure == 'companion_fixed':
             u = self._action_encoder.inverse(z, u)
         return u
