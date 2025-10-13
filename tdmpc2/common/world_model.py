@@ -576,7 +576,7 @@ class LaLQR(WorldModel):
             self.init() # target Q
 
         # self.K = torch.zeros(self.action_dim, self.latent_dim)
-        self.register_buffer("K", torch.zeros(self.latent_dim, self.action_dim))
+        self.register_buffer("K", torch.zeros(self.action_dim, self.latent_dim)) # u = -Kx
         self.register_buffer("C", torch.zeros(self.latent_dim, self.latent_dim*self.action_dim))
         self.register_buffer("rank_c", torch.tensor(0.0))
         self.register_buffer("eigen_max", torch.tensor(0.0))

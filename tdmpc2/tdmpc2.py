@@ -386,7 +386,12 @@ z (torch.Tensor): Latent state from which to plan.
         # Compute losses
         reward_loss, value_loss = 0, 0
         for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
-            reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
+            if hasattr(self.cfg, 'loss_type') and self.cfg.loss_type == 'kl':
+                rew_pred_unbind = rew_pred_unbind.view(-1, self.cfg.kl_batch)
+                rew_unbind = rew_unbind.view(-1, self.cfg.kl_batch)
+                reward_loss = reward_loss + math.softmax_distillation_loss(rew_pred_unbind, rew_unbind, self.cfg.kl_temp).mean() * self.cfg.rho**t
+            else:
+                reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
             for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
                 value_loss = value_loss + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
 

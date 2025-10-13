@@ -100,3 +100,7 @@ model_name: lalqr
 dynamic_structure: full
 cost_structure: full
 
+loss_type: mse
+kl_temp: 0.5
+kl_batch: 8
+
