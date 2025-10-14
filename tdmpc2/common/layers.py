@@ -573,12 +573,13 @@ class ConditionalInvertibleLinear(nn.Module):
         self.F = nn.Parameter(torch.zeros(dim_u, dim_z), requires_grad=True)
 
     def forward(self, z, u):
-        # batch = x.size(0)
-        # out = self.hyper(x)
-        # M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
+        # batch = z.size(0)
+        # out = self.hyper(z)
+        # M = out[..., :self.dim_u*self.dim_u].reshape(*z.shape[:-1], self.dim_u, self.dim_u)
         # b = out[..., self.dim_u*self.dim_u:]
+        # M = 0.5 * (M - M.T)
         # W = torch.matrix_exp(M)
-        # v = torch.einsum('...i,...ij->...j', u, W) + b
+        # v = torch.einsum('...n,...mn->...m', u, W) + b
         fx = torch.einsum('...n,...mn->...m', z, self.F)
         G = 0.5 * (self.G - self.G.T) 
         W_inv = torch.matrix_exp(-G)
@@ -586,12 +587,13 @@ class ConditionalInvertibleLinear(nn.Module):
         return v 
 
     def inverse(self, z, v):
-        # batch = x.size(0)
-        # out = self.hyper(x)
-        # M = out[..., :self.dim_u*self.dim_u].reshape(*x.shape[:-1], self.dim_u, self.dim_u)
+        # batch = z.size(0)
+        # out = self.hyper(z)
+        # M = out[..., :self.dim_u*self.dim_u].reshape(*z.shape[:-1], self.dim_u, self.dim_u)
         # b = out[..., self.dim_u*self.dim_u:]
+        # M = 0.5 * (M - M.T)
         # W_inv = torch.matrix_exp(-M)
-        # u = torch.einsum('...i,...ij->...j', v - b, W_inv)
+        # u = torch.einsum('...n,...mn->...m', v - b, W_inv)
         fx = torch.einsum('...n,mn->...m', z, self.F)
         G = 0.5 * (self.G - self.G.T) 
         W = torch.matrix_exp(G)
