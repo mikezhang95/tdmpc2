@@ -643,6 +643,8 @@ class LaLQR(WorldModel):
         Predicts instantaneous (single-step) reward.
         """
         next_z = self.next(z, a, task)
+        f self.cfg.dynamic_structure == 'companion_fixed':
+            a = self._action_encoder(z, a)
         # M: this is done in next
         # if self.cfg.dynamic_structure == 'companion_fixed':
         #     a = self._action_encoder(z, a)
