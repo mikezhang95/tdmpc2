@@ -69,6 +69,7 @@ simnorm_dim: 8
 wandb_project: tdmpc-new
 wandb_entity: mikezhang95
 wandb_silent: false
+wandb_name: "1"
 enable_wandb: true
 save_csv: true
 

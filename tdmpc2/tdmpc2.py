@@ -390,6 +390,8 @@ z (torch.Tensor): Latent state from which to plan.
                 rew_pred_unbind = rew_pred_unbind.view(-1, self.cfg.kl_batch)
                 rew_unbind = rew_unbind.view(-1, self.cfg.kl_batch)
                 reward_loss = reward_loss + math.softmax_distillation_loss(rew_pred_unbind, rew_unbind, self.cfg.kl_temp).mean() * self.cfg.rho**t
+            elif hasattr(self.cfg, 'loss_type') and self.cfg.loss_type == 'pairwise':
+                reward_loss = reward_loss + math.pairwise_logistic_loss(rew_pred_unbind, rew_unbind).mean() * self.cfg.rho**t
             else:
                 reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
             for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):

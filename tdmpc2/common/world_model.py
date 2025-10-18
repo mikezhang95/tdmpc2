@@ -557,13 +557,18 @@ class LaLQR(WorldModel):
             Q.requires_grad = False
         else:
             torch.nn.init.trunc_normal_(Q, std=1.0)
-        # M: R is not used in current setups
-        # R = torch.nn.Parameter(torch.randn(cfg.action_dim, cfg.action_dim))
-        R = torch.nn.Parameter(0.001*torch.eye(cfg.action_dim), requires_grad=False) 
+        # M: R = 0 for now
+        R = torch.nn.Parameter(0.00*torch.eye(cfg.action_dim), requires_grad=False) 
         self._reward = nn.ParameterList([Q, R])
 
         if 'mono' in self.cfg.cost_structure:
-            self._reward_mixer = lmn.MonotonicLayer(1, 1)
+            # self._reward_mixer = lmn.MonotonicLayer(1, 1)
+            self._reward_mixer = torch.nn.Sequential(
+                    lmn.direct_norm(torch.nn.Linear(1, 32), kind="one-inf"),
+                    lmn.GroupSort(2),
+                    lmn.direct_norm(torch.nn.Linear(32, 32), kind="inf"),
+                    lmn.GroupSort(2),
+                    lmn.direct_norm(torch.nn.Linear(32, 1), kind="inf"))
 
         # === value functions === (M: not used in control since LQR is infinite horizon)
         self._Qs = layers.Ensemble([layers.mlp(self.latent_dim + self.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
@@ -643,22 +648,26 @@ class LaLQR(WorldModel):
         Predicts instantaneous (single-step) reward.
         """
         next_z = self.next(z, a, task)
+        # M: this is done in next, redo it due to cost_a
         if self.cfg.dynamic_structure == 'companion_fixed':
             a = self._action_encoder(z, a)
-        # M: this is done in next
-        # if self.cfg.dynamic_structure == 'companion_fixed':
-        #     a = self._action_encoder(z, a)
 
         _, _, Q, R = self.get_lqr_matrics(device=z.device)
         # M: the cost_z is on next state
-        # cost_z = (torch.matmul(torch.matmul(next_z, Q.T), torch.transpose(next_z, -1, -2))).diagonal(dim1=-2, dim2=-1).unsqueeze(-1)
-        # cost_a = (torch.matmul(torch.matmul(a, R.T), torch.transpose(a, -1, -2))).diagonal(dim1=-2, dim2=-1).unsqueeze(-1)
         cost_z = torch.einsum('...i,ij,...j->...', next_z, Q, next_z).unsqueeze(-1) # / self.latent_dim / self.latent_dim
         cost_a = torch.einsum('...i,ij,...j->...', a, R, a).unsqueeze(-1) # / self.action_dim / self.action_dim
         # M: combined with num_bins=1 (monotonic symlog function) to match the scale with reward 
-        reward = - cost_z - cost_a
+        cost = cost_z + cost_a
         if 'mono' in self.cfg.cost_structure:
-            reward = self._reward_mixer(reward)
+            reward = self._reward_mixer(-cost)
+        elif 'exp' in self.cfg.cost_structure:
+            reward = 2.0 * torch.exp(- 1.0 * cost)
+        elif 'inv' in self.cfg.cost_structure:
+            reward = 2.0 / (1.0 + 1.0 * cost)
+        elif 'sigmoid' in self.cfg.cost_structure:
+            reward = 4.0 * torch.sigmoid(- 1.0 * cost)
+        else:
+            reward = - cost 
         return reward
 
     def __repr__(self):

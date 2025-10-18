@@ -152,3 +152,45 @@ def bc_loss(mu, log_std, gt_actions):
     loss = -log_prob.mean()
 
     return loss
+    
+
+def pairwise_logistic_loss(rew_pred, rew, num_pairs=100, tau=1.0, eps=1e-8, weight_by_delta=True, min_delta=1e-6):
+    """
+    r: Tensor[N]  (真实 reward)
+    c: Tensor[N]  (cost)
+    pairs: list of (i,j) indices or None -> sample random pairs
+    tau: temperature
+    weight_by_delta: weight pair loss by |r_i - r_j|
+    min_delta: ignore pairs with |r_i-r_j| < min_delta
+    """
+    N = rew.shape[0]
+    device = rew.device
+
+    # sample random pairs: you can sample M pairs
+    M = min(num_pairs, N*(N-1)//2)
+    i = torch.randint(0, N, (M,), device=device)
+    j = torch.randint(0, N, (M,), device=device)
+    mask = i != j
+    i_idx, j_idx = i[mask], j[mask]
+
+    # M: reverse order
+    delta_rew = rew[i_idx] - rew[j_idx]
+    delta_rew_pred = rew_pred[j_idx] - rew_pred[i_idx]
+
+    # # ignore near-equal reward pairs
+    # mask = (delta_rew.abs() >= min_delta)
+    # if mask.sum() == 0:
+    #     return torch.tensor(0., device=r.device, requires_grad=True)
+    # delta_r = delta_r[mask]
+    # delta_c = (c_i - c_j)[mask]
+
+    # target sign: want delta_r * delta_c < 0
+    # loss = log(1 + exp( (delta_r * delta_c)/tau ))
+    x = (delta_rew * delta_rew_pred) / (tau + 1e-12)
+    losses = F.softplus(x)  # softplus(x) = log(1+exp(x)), stable
+
+    if weight_by_delta:
+        w = delta_rew.abs()
+        losses = losses * w
+
+    return losses
