@@ -561,14 +561,15 @@ class LaLQR(WorldModel):
         R = torch.nn.Parameter(0.00*torch.eye(cfg.action_dim), requires_grad=False) 
         self._reward = nn.ParameterList([Q, R])
 
-        if 'mono' in self.cfg.cost_structure:
-            # self._reward_mixer = lmn.MonotonicLayer(1, 1)
-            self._reward_mixer = torch.nn.Sequential(
-                    lmn.direct_norm(torch.nn.Linear(1, 32), kind="one-inf"),
-                    lmn.GroupSort(2),
-                    lmn.direct_norm(torch.nn.Linear(32, 32), kind="inf"),
-                    lmn.GroupSort(2),
-                    lmn.direct_norm(torch.nn.Linear(32, 1), kind="inf"))
+        if 'bn' in self.cfg.cost_structure: bn = True
+        else: bn = False
+        if 'affine' in self.cfg.cost_structure:
+            self._reward_mixer = layers.LearnableAffine(init_b=1e-3, init_a=2.0, bn=bn)
+        elif 'rational' in self.cfg.cost_structure:
+            self._reward_mixer = layers.LearnableRational(init_scale=1e3, init_beta=0.01, init_M=2.0, bn=bn)
+        elif 'exp' in self.cfg.cost_structure:
+            self._reward_mixer = layers.LearnableScaledExp(init_scale=1e3, init_alpha=0.01, init_M=2.0, bn=bn)
+        # self._reward_mixer.trainable = False
 
         # === value functions === (M: not used in control since LQR is infinite horizon)
         self._Qs = layers.Ensemble([layers.mlp(self.latent_dim + self.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
@@ -658,14 +659,14 @@ class LaLQR(WorldModel):
         cost_a = torch.einsum('...i,ij,...j->...', a, R, a).unsqueeze(-1) # / self.action_dim / self.action_dim
         # M: combined with num_bins=1 (monotonic symlog function) to match the scale with reward 
         cost = cost_z + cost_a
-        if 'mono' in self.cfg.cost_structure:
-            reward = self._reward_mixer(-cost)
-        elif 'exp' in self.cfg.cost_structure:
-            reward = 2.0 * torch.exp(- 1.0 * cost)
-        elif 'inv' in self.cfg.cost_structure:
-            reward = 2.0 / (1.0 + 1.0 * cost)
-        elif 'sigmoid' in self.cfg.cost_structure:
-            reward = 4.0 * torch.sigmoid(- 1.0 * cost)
+
+        # prelog to scale cost
+        if 'prelog' in self.cfg.cost_structure:
+            cost = torch.log(1 + cost)
+
+        # activation function
+        if 'affine' in self.cfg.cost_structure or 'exp' in self.cfg.cost_structure or 'inv' in self.cfg.cost_structure: 
+            reward = self._reward_mixer(cost)
         else:
             reward = - cost 
         return reward

@@ -5,6 +5,7 @@ import numpy as np
 import time
 
 from common import math
+from common import utils
 from common.scale import RunningScale
 from common.layers import api_model_conversion
 from common.world_model import WorldModel
@@ -34,12 +35,13 @@ class TDMPC2(torch.nn.Module):
             self.model = LaLQR(cfg).to(self.device) # Fac-TDMPC
         else:
             self.model = WorldModel(cfg).to(self.device) # TDMPC2
-        self.optim = torch.optim.Adam([
+        # self.optim = torch.optim.Adam([
+        self.optim = torch.optim.AdamW([
             {'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
             {'params': self.model._dynamics.parameters()},
             {'params': self.model._reward.parameters()},
             {'params': self.model._Qs.parameters()},
-            {'params': self.model._reward_mixer.parameters() if hasattr(self.model, '_reward_mixer') else []},
+            {'params': self.model._reward_mixer.parameters() if hasattr(self.model, '_reward_mixer') else [], 'lr': self.cfg.lr * 0.1},
             {'params': self.model._value_mixer.parameters() if hasattr(self.model, '_value_mixer') else []},
             {'params': self.model._action_encoder.parameters() if hasattr(self.model, '_action_encoder') else []},
             {'params': self.model._action_decoder.parameters() if hasattr(self.model, '_action_decoder') else []},
@@ -387,9 +389,8 @@ z (torch.Tensor): Latent state from which to plan.
         reward_loss, value_loss = 0, 0
         for t, (rew_pred_unbind, rew_unbind, td_targets_unbind, qs_unbind) in enumerate(zip(reward_preds.unbind(0), reward.unbind(0), td_targets.unbind(0), qs.unbind(1))):
             if hasattr(self.cfg, 'loss_type') and self.cfg.loss_type == 'kl':
-                rew_pred_unbind = rew_pred_unbind.view(-1, self.cfg.kl_batch)
-                rew_unbind = rew_unbind.view(-1, self.cfg.kl_batch)
-                reward_loss = reward_loss + math.softmax_distillation_loss(rew_pred_unbind, rew_unbind, self.cfg.kl_temp).mean() * self.cfg.rho**t
+                rew_pred_unbind_expand, rew_unbind_expand = utils.sample_negatives(rew_pred_unbind, rew_unbind, self.cfg.kl_batch)
+                reward_loss = reward_loss + math.softmax_distillation_loss(rew_pred_unbind_expand, rew_unbind_expand, self.cfg.kl_temp).mean() * self.cfg.rho**t
             elif hasattr(self.cfg, 'loss_type') and self.cfg.loss_type == 'pairwise':
                 reward_loss = reward_loss + math.pairwise_logistic_loss(rew_pred_unbind, rew_unbind).mean() * self.cfg.rho**t
             else:

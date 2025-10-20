@@ -604,3 +604,78 @@ class ConditionalInvertibleLinear(nn.Module):
             W_inv = torch.matrix_exp(-M)
             u = torch.einsum('...n,...mn->...m', v - b, W_inv)
         return u
+        
+
+# -------------------------------
+# Mapper 1: simple affine (baseline)
+# r_pred = a + b * (-c_norm)
+# -------------------------------
+class LearnableAffine(nn.Module):
+    def __init__(self, init_b=1e-3, init_a=0.0, bn=False):
+        super().__init__()
+        self.a = nn.Parameter(torch.tensor(float(init_a)))
+        self.raw_b = nn.Parameter(torch.tensor(float(init_b)))  # will softplus to be positive
+
+        self.bn = None
+        if bn: self.bn = nn.BatchNorm1d(1, affine=False)
+
+    def forward(self, c):
+        if self.bn: 
+             c = self.bn(c)
+             c = c.clamp(-10, 10)
+        b = F.softplus(self.raw_b)
+        return self.a + b * (-c)
+
+# -------------------------------
+# Mapper 2: rational (recommended)
+# r_pred = M / (1 + beta * softplus(c_norm))
+# -------------------------------
+class LearnableRational(nn.Module):
+    def __init__(self, init_scale=1.0, init_beta=1.0, init_M=1.0, bn=False):
+        super().__init__()
+        # store log params to stabilize
+        self.log_s = nn.Parameter(torch.log(torch.tensor(float(init_scale))))
+        self.log_beta = nn.Parameter(torch.log(torch.tensor(float(init_beta))))
+        self.log_M = nn.Parameter(torch.log(torch.tensor(float(init_M))))
+
+        self.bn = None
+        if bn: self.bn = nn.BatchNorm1d(1, affine=False)
+
+    def forward(self, c):
+        if self.bn: 
+             c = self.bn(c)
+             c = c.clamp(-10, 10)
+        s = F.softplus(self.log_s)
+        beta = F.softplus(self.log_beta)
+        M = F.softplus(self.log_M)
+        cpos = F.softplus(c)   # ensure non-neg
+        c_norm = cpos / (s + 1e-8)
+        return M / (1.0 + beta * c_norm)
+
+# -------------------------------
+# Mapper 3: scaled exp
+# r_pred = M * exp(-alpha * c_norm)
+# -------------------------------
+class LearnableScaledExp(nn.Module):
+    def __init__(self, init_scale=1.0, init_alpha=0.1, init_M=1.0, bn=False):
+        super().__init__()
+        self.log_s = nn.Parameter(torch.log(torch.tensor(float(init_scale))))
+        # raw_alpha param through softplus to be positive but small initial
+        self.raw_alpha = nn.Parameter(torch.tensor(float(init_alpha)))
+        self.log_M = nn.Parameter(torch.log(torch.tensor(float(init_M))))
+
+        self.bn = None
+        if bn: self.bn = nn.BatchNorm1d(1, affine=False)
+
+    def forward(self, c):
+        if self.bn: 
+             c = self.bn(c)
+             c = c.clamp(-10, 10)
+        s = F.softplus(self.log_s)
+        alpha = F.softplus(self.raw_alpha)  # note: initial small
+        M = F.softplus(self.log_M)
+        cpos = F.softplus(c)
+        c_norm = cpos / (s + 1e-8)
+        # clamp c_norm to avoid overflow
+        c_norm = c_norm.clamp(max=10.0)
+        return M * torch.exp(-alpha * c_norm)

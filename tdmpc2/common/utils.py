@@ -60,3 +60,26 @@ def torch_to_np(t):
         return np.array([])
     else:
         return t.cpu().detach().numpy()
+
+def sample_negatives(x, y, k):
+    """
+    x: [B, 1] tensor
+    return: [B, k] tensor, where each row = [x_i, (k-1) negatives]
+    """
+    B = x.size(0)
+    device = x.device
+
+    # Expand original positives
+    positives_x = x.view(B, 1)
+    positives_y = y.view(B, 1)
+
+    rand_idx = torch.randint(0, B-1, (B, k-1), device=device)
+    mask = rand_idx >= torch.arange(B, device=device).unsqueeze(1)
+    rand_idx += mask.long()  
+
+    negatives_x = x[rand_idx].squeeze(-1)  # shape [B, k-1]
+    negatives_y = y[rand_idx].squeeze(-1)  # shape [B, k-1]
+
+    out_x = torch.cat([positives_x, negatives_x], dim=1)
+    out_y = torch.cat([positives_y, negatives_y], dim=1)
+    return out_x, out_y
