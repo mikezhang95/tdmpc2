@@ -621,8 +621,11 @@ class LearnableAffine(nn.Module):
 
     def forward(self, c):
         if self.bn: 
-             c = self.bn(c)
-             c = c.clamp(-10, 10)
+            H, B, D = c.shape
+            c_flat = c.view(H*B, D)
+            c = self.bn(c_flat)
+            c = c.clamp(-10, 10)
+            c = c.view(H, B, D)
         b = F.softplus(self.raw_b)
         return self.a + b * (-c)
 
@@ -643,8 +646,11 @@ class LearnableRational(nn.Module):
 
     def forward(self, c):
         if self.bn: 
-             c = self.bn(c)
-             c = c.clamp(-10, 10)
+            H, B, D = c.shape
+            c_flat = c.view(H*B, D)
+            c = self.bn(c_flat)
+            c = c.clamp(-10, 10)
+            c = c.view(H, B, D)
         s = F.softplus(self.log_s)
         beta = F.softplus(self.log_beta)
         M = F.softplus(self.log_M)
@@ -669,8 +675,11 @@ class LearnableScaledExp(nn.Module):
 
     def forward(self, c):
         if self.bn: 
-             c = self.bn(c)
-             c = c.clamp(-10, 10)
+            H, B, D = c.shape
+            c_flat = c.view(H*B, D)
+            c = self.bn(c_flat)
+            c = c.clamp(-10, 10)
+            c = c.view(H, B, D)
         s = F.softplus(self.log_s)
         alpha = F.softplus(self.raw_alpha)  # note: initial small
         M = F.softplus(self.log_M)

@@ -565,7 +565,7 @@ class LaLQR(WorldModel):
         else: bn = False
         if 'affine' in self.cfg.cost_structure:
             self._reward_mixer = layers.LearnableAffine(init_b=1e-3, init_a=2.0, bn=bn)
-        elif 'rational' in self.cfg.cost_structure:
+        elif 'inv' in self.cfg.cost_structure:
             self._reward_mixer = layers.LearnableRational(init_scale=1e3, init_beta=0.01, init_M=2.0, bn=bn)
         elif 'exp' in self.cfg.cost_structure:
             self._reward_mixer = layers.LearnableScaledExp(init_scale=1e3, init_alpha=0.01, init_M=2.0, bn=bn)
@@ -667,6 +667,8 @@ class LaLQR(WorldModel):
         # activation function
         if 'affine' in self.cfg.cost_structure or 'exp' in self.cfg.cost_structure or 'inv' in self.cfg.cost_structure: 
             reward = self._reward_mixer(cost)
+        elif 'tanh' in self.cfg.cost_structure:
+            reward = torch.tanh( - cost / 1e3) * 4.0
         else:
             reward = - cost 
         return reward
