@@ -564,12 +564,14 @@ class LaLQR(WorldModel):
         if 'bn' in self.cfg.cost_structure: bn = True
         else: bn = False
         if 'affine' in self.cfg.cost_structure:
-            self._reward_mixer = layers.LearnableAffine(init_b=1e-3, init_a=2.0, bn=bn)
+            self._reward_mixer = layers.LearnableAffine(init_b=1.0, init_a=2.0, bn=bn)
         elif 'inv' in self.cfg.cost_structure:
             self._reward_mixer = layers.LearnableRational(init_scale=1e3, init_beta=0.01, init_M=2.0, bn=bn)
         elif 'exp' in self.cfg.cost_structure:
             self._reward_mixer = layers.LearnableScaledExp(init_scale=1e3, init_alpha=0.01, init_M=2.0, bn=bn)
-        # self._reward_mixer.trainable = False
+        if 'frozen' in self.cfg.cost_structure:
+            for p in self._reward_mixer.parameters():
+                p.requires_grad = False
 
         # === value functions === (M: not used in control since LQR is infinite horizon)
         self._Qs = layers.Ensemble([layers.mlp(self.latent_dim + self.action_dim + cfg.task_dim, 2*[cfg.mlp_dim], max(cfg.num_bins, 1), dropout=cfg.dropout) for _ in range(cfg.num_q)])
