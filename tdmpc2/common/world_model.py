@@ -5,12 +5,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tensordict.nn import TensorDictParams
-import control
 import monotonicnetworks as lmn
+import control
 
 from common import layers, math, init
 from common.utils import benchmark_torch_function, np_to_torch
 from common import tdmpc_utils # tdmpc-1 utils
+from common import utils
 
 # TDMPC2
 class WorldModel(nn.Module):
@@ -509,9 +510,9 @@ class LaLQR(WorldModel):
     def __init__(self, cfg, is_student=False):
 
         nn.Module.__init__(self)
+        # === hyperparameters ===
         self.cfg = cfg
         self.is_student = is_student
-
         self.action_dim = cfg.action_dim
         self.raw_latent_dim = cfg.latent_dim
         self.latent_dim = cfg.latent_dim_internal // cfg.action_dim * cfg.action_dim # TODO: better way to split contraollability indices
@@ -519,12 +520,12 @@ class LaLQR(WorldModel):
         self.latent_dim_agent = self.latent_dim
         self.num_agents = 1
 
+        # === state/action encoders ===
         if is_student:
             self._encoder = layers.mlp(self.raw_latent_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim)
         else:
             self._encoder = layers.mlp(cfg.obs_shape['state'][0] + cfg.task_dim, max(cfg.num_enc_layers-1, 1)*[cfg.enc_dim], self.latent_dim)
             self._pi = layers.mlp(self.latent_dim + cfg.task_dim, 2*[cfg.mlp_dim], 2*cfg.action_dim) # - Kx
-
         if self.cfg.dynamic_structure == 'companion_fixed':
             self._action_encoder = layers.ConditionalInvertibleLinear(self.latent_dim, self.action_dim)
         
@@ -547,20 +548,27 @@ class LaLQR(WorldModel):
         self._dynamics = torch.nn.ParameterList([A, B])
 
         # === cost functions ===
-        if 'diag' in self.cfg.cost_structure:
-            Q = torch.nn.Parameter(torch.ones(self.latent_dim))
-        elif 'psd' in self.cfg.cost_structure:
-            Q = torch.nn.Parameter(torch.randn(self.latent_dim, self.latent_dim))
-        else: 
-            Q = torch.nn.Parameter(torch.randn(self.latent_dim, self.latent_dim))
-        if 'fixed' in self.cfg.cost_structure:
-            Q.requires_grad = False
+        if 'aug' in self.cfg.cost_structure:
+            self._reward = layers.mlp(self.latent_dim, 2*[cfg.mlp_dim], 1)
+            ar = torch.nn.Parameter(torch.zeros(self.latent_dim+1)) # [n_z]
+            br = torch.nn.Parameter(torch.zeros(self.action_dim)) # [n_u]
+            self._dynamics.extend(torch.nn.ParameterList([ar, br]))
         else:
-            torch.nn.init.trunc_normal_(Q, std=1.0)
-        # M: R = 0 for now
-        R = torch.nn.Parameter(0.00*torch.eye(cfg.action_dim), requires_grad=False) 
-        self._reward = nn.ParameterList([Q, R])
+            if 'diag' in self.cfg.cost_structure:
+                Q = torch.nn.Parameter(torch.ones(self.latent_dim))
+                R = torch.nn.Parameter(0.00*torch.eye(cfg.action_dim))
+            elif 'psd' in self.cfg.cost_structure:
+                Q = torch.nn.Parameter(torch.randn(self.latent_dim, self.latent_dim))
+                R = torch.nn.Parameter(0.00*torch.eye(cfg.action_dim), requires_grad=False) 
+            else: 
+                Q = torch.nn.Parameter(torch.randn(self.latent_dim, self.latent_dim))
+                R = torch.nn.Parameter(0.00*torch.eye(cfg.action_dim), requires_grad=False) 
+            if 'fixed' in self.cfg.cost_structure:
+                Q.requires_grad = False
+                R.requires_grad = False
+            self._reward = nn.ParameterList([Q, R])
 
+        # === activation functions === (M: not used in control)
         if 'bn' in self.cfg.cost_structure: bn = True
         else: bn = False
         if 'affine' in self.cfg.cost_structure:
@@ -569,7 +577,7 @@ class LaLQR(WorldModel):
             self._reward_mixer = layers.LearnableRational(init_scale=1e3, init_beta=0.01, init_M=2.0, bn=bn)
         elif 'exp' in self.cfg.cost_structure:
             self._reward_mixer = layers.LearnableScaledExp(init_scale=1e3, init_alpha=0.01, init_M=2.0, bn=bn)
-        if 'frozen' in self.cfg.cost_structure:
+        if 'fa' in self.cfg.cost_structure:  # fix activation
             for p in self._reward_mixer.parameters():
                 p.requires_grad = False
 
@@ -583,9 +591,14 @@ class LaLQR(WorldModel):
             self.register_buffer("log_std_dif", torch.tensor(cfg.log_std_max) - self.log_std_min)
             self.init() # target Q
 
-        # self.K = torch.zeros(self.action_dim, self.latent_dim)
-        self.register_buffer("K", torch.zeros(self.action_dim, self.latent_dim)) # u = -Kx
-        self.register_buffer("C", torch.zeros(self.latent_dim, self.latent_dim*self.action_dim))
+
+        if 'aug' in self.cfg.cost_structure:
+            self.register_buffer("K", torch.zeros(self.action_dim, self.latent_dim+1)) # u = -Kx
+            self.register_buffer("k", torch.zeros(self.action_dim)) 
+            self.register_buffer("C", torch.zeros(self.latent_dim+1, (self.latent_dim+1)*self.action_dim))
+        else:
+            self.register_buffer("K", torch.zeros(self.action_dim, self.latent_dim)) # u = -Kx
+            self.register_buffer("C", torch.zeros(self.latent_dim, self.latent_dim*self.action_dim))
         self.register_buffer("rank_c", torch.tensor(0.0))
         self.register_buffer("eigen_max", torch.tensor(0.0))
         self.register_buffer("eigen_min", torch.tensor(0.0))
@@ -594,7 +607,8 @@ class LaLQR(WorldModel):
 
         hidden_dim, action_dim = self.latent_dim, self.action_dim
 
-        A, B = self._dynamics
+        # === recover dynamics ===
+        A, B = self._dynamics[:2]
         new_A, new_B = A, B
         if 'companion' in self.cfg.dynamic_structure:
             raw_dim = hidden_dim // action_dim
@@ -611,13 +625,27 @@ class LaLQR(WorldModel):
             new_A = torch.zeros((hidden_dim, hidden_dim), device=device)
             new_A[range(hidden_dim), range(hidden_dim)] = A
         
-        Q, R = self._reward
-        new_Q, new_R = Q, R
-        if 'psd' in self.cfg.cost_structure:
-            new_Q = torch.matmul(Q, Q.t()) + torch.eye(hidden_dim).to(device)
-        elif 'diag' in self.cfg.cost_structure:
-            new_Q = torch.zeros((hidden_dim, hidden_dim), device=device)
-            new_Q[range(hidden_dim), range(hidden_dim)] = Q * Q
+        # === recover costs ===
+        if 'aug' in self.cfg.cost_structure:
+            # new_Q = torch.zeros((hidden_dim+1, hidden_dim+1), device=device)
+            new_Q = torch.eye(hidden_dim+1, device=device) * 1e-6
+            new_R = torch.zeros((action_dim, action_dim), device=device)
+            ar, br = self._dynamics[2:]
+            new_new_A = torch.zeros((hidden_dim+1, hidden_dim+1), device=device)
+            new_new_B = torch.zeros((hidden_dim+1, action_dim), device=device)
+            new_new_A[:hidden_dim, :hidden_dim] = new_A
+            new_new_A[hidden_dim, :] = ar
+            new_new_B[:hidden_dim, :] = new_B
+            new_new_B[hidden_dim, :] = br
+            new_A, new_B = new_new_A, new_new_B 
+        else:
+            Q, R = self._reward
+            new_Q, new_R = Q, R
+            if 'psd' in self.cfg.cost_structure:
+                new_Q = torch.matmul(Q, Q.t()) + torch.eye(hidden_dim).to(device)
+            elif 'diag' in self.cfg.cost_structure:
+                new_Q = torch.zeros((hidden_dim, hidden_dim), device=device)
+                new_Q[range(hidden_dim), range(hidden_dim)] = Q * Q
 
         new_A, new_R = new_A * np.sqrt(discount), new_R / discount
 
@@ -642,30 +670,36 @@ class LaLQR(WorldModel):
         if self.cfg.dynamic_structure == 'companion_fixed':
             a = self._action_encoder(z, a)
         A, B, _, _ = self.get_lqr_matrics(device=z.device)
-        # next_z = z @ A.T + a @ B.T
-        next_z = torch.einsum('...d,nd->...n', z, A) + torch.einsum('...m,nm->...n', a, B)
+        next_z = torch.einsum('...d,nd->...n', z, A[:self.latent_dim,:self.latent_dim]) + torch.einsum('...m,nm->...n', a, B[:self.latent_dim])
         return next_z
 
     def reward(self, z, a, task, return_individual=False):
         """
         Predicts instantaneous (single-step) reward.
         """
-        next_z = self.next(z, a, task)
-        # M: this is done in next, redo it due to cost_a
         if self.cfg.dynamic_structure == 'companion_fixed':
             a = self._action_encoder(z, a)
+        A, B, Q, R = self.get_lqr_matrics(device=z.device)
+        next_z = torch.einsum('...d,nd->...n', z, A[:self.latent_dim, :self.latent_dim] ) + torch.einsum('...m,nm->...n', a, B[:self.latent_dim])
 
-        _, _, Q, R = self.get_lqr_matrics(device=z.device)
+        if 'aug' in self.cfg.cost_structure:
+            ar, br = self._dynamics[2:]
+            next_cost = self._reward(next_z)
+            cur_cost = self._reward(z).detach()
+            aug_z = torch.cat([z, cur_cost], dim=-1) # [..., z_dim+1]
+            next_cost2 = torch.einsum('...d,d->...', aug_z, ar) + torch.einsum('...m,m->...', a, br)
+            return torch.cat([-next_cost, -next_cost2.unsqueeze(-1)], dim=-1)
+
         # M: the cost_z is on next state
         cost_z = torch.einsum('...i,ij,...j->...', next_z, Q, next_z).unsqueeze(-1) # / self.latent_dim / self.latent_dim
         cost_a = torch.einsum('...i,ij,...j->...', a, R, a).unsqueeze(-1) # / self.action_dim / self.action_dim
         # M: combined with num_bins=1 (monotonic symlog function) to match the scale with reward 
         cost = cost_z + cost_a
 
+        # === activation functions ===
         # prelog to scale cost
         if 'prelog' in self.cfg.cost_structure:
             cost = torch.log(1 + cost)
-
         # activation function
         if 'affine' in self.cfg.cost_structure or 'exp' in self.cfg.cost_structure or 'inv' in self.cfg.cost_structure: 
             reward = self._reward_mixer(cost)
@@ -688,10 +722,15 @@ class LaLQR(WorldModel):
             try: 
                 discount = 1.0 # 2.0, increase discount makes (A-BK) stable
                 A, B, Q, R = self.get_lqr_matrics(to_numpy=True, discount=discount)
+                q, r = None, None
+                if 'aug' in self.cfg.cost_structure:
+                    # A: [hidden_dim+1, hidden_dim+1], B: [hidden_dim+1, action_dim]
+                    q = np.zeros((A.shape[1],1))
+                    q[-1] = 1.0
+                # K, S, E = control.dlqr(A, B, Q, R)
+                K, k0, S, E = utils.dlqr_with_linear_terms(A, B, Q, R, q)
                 C = control.ctrb(A, B)
                 rank_c = np.linalg.matrix_rank(C)
-                K, S, E = control.dlqr(A, B, Q, R)
-                self.K = np_to_torch(K, device=z.device)
                 self.C = np_to_torch(C, device=z.device)
                 self.rank_c = np_to_torch(float(rank_c), device=z.device)
                 I = A - np.matmul(B, K)
@@ -699,123 +738,18 @@ class LaLQR(WorldModel):
                 eigen_i = np.abs(evalues)
                 self.eigen_max = np_to_torch(float(np.max(eigen_i)), device=z.device)
                 self.eigen_min = np_to_torch(float(np.min(eigen_i)), device=z.device)
+                self.K = np_to_torch(K, device=z.device)
+                self.k = np_to_torch(k0, device=z.device)
             except Exception as e:
                 print(f'Calculating K errors: {e}')
-        K_T = self.K.T.to(z.device)  # [n_s, n_u]
-        u = - torch.matmul(z, K_T) # [B, n_s] x [n_s, n_u] = [B, n_u]
+
+        if 'aug' in self.cfg.cost_structure:
+            cost = self._reward(z)
+            aug_z = torch.cat([z, cost], dim=-1)
+            u = - torch.einsum('...n, mn->...m', aug_z, self.K) - self.k # [B, n_s] x [n_s, n_u] = [B, n_u]
+        else:
+            u = - torch.einsum('...n, mn->...m', z, self.K) 
         if self.cfg.dynamic_structure == 'companion_fixed':
             u = self._action_encoder.inverse(z, u)
         return u
-
-# class FacWorldModel(WorldModel):
-#     """
-#     Factored TD-MPC2 implicit world model architecture.
-#     Can be used for both single-task and multi-task experiments.
-#     """
-
-#     def __init__(self, cfg):
-
-#         nn.Module.__init__(self)
-
-#         # M: action/latent dimensions
-#         self.num_agents = cfg.num_agents
-#         self.action_dim_agent = cfg.action_dim // self.num_agents
-#         self.latent_dim_agent = max(cfg.latent_dim // self.num_agents, 50)
-#         self.latent_dim_agent = self.latent_dim_agent // cfg.simnorm_dim * cfg.simnorm_dim
-#         self.cfg = cfg
-
-#         # central modules
-#         self._encoder = layers.mlp(cfg.latent_dim, cfg.enc_dim, self.latent_dim_agent*self.num_agents, act=layers.SimNorm(cfg))
-
-#         # factored modules
-#         mlp_dim_agent = max(cfg.mlp_dim // self.num_agents, 50)
-#         self._dynamics = layers.FacMLP(self.num_agents, self.latent_dim_agent + self.action_dim_agent, 2*[mlp_dim_agent], self.latent_dim_agent, act=layers.SimNorm(cfg)) 
-#         self._reward = layers.FacMLP(self.num_agents, self.latent_dim_agent + self.action_dim_agent, 2*[mlp_dim_agent], 1)
-#         self._Qs = layers.Ensemble([layers.FacMLP(self.num_agents, self.latent_dim_agent + self.action_dim_agent, 2*[mlp_dim_agent], 1, dropout=cfg.dropout) for _ in range(cfg.num_q)])
-
-#         # init
-#         self.apply(init.weight_init)
-#         init.zero_([self._reward.node_update[-1].weight, self._Qs.params["node_update", "2", "weight"]])
-#         init.zero_([self._reward.node_update[-1].bias, self._Qs.params["node_update", "2", "bias"]])
-
-#     def encode(self, obs, task=None):
-#         """
-#         Encodes an observation into its latent representation.
-#         This implementation assumes a single state-based observation.
-#         """
-#         return self._encoder(obs)
-
-#     def _generate_node_features(self, z, a):
-#         """
-#         Concat state and action for nodes
-#         """
-#         latent_node = torch.reshape(z, (*z.shape[:-1], self.num_agents, self.latent_dim_agent))
-#         action_node = torch.reshape(a, (*a.shape[:-1], self.num_agents, self.action_dim_agent))
-#         node_features = torch.cat([latent_node, action_node], dim=-1) # [num_step*num_traj, num_agents, node_dim]
-#         return node_features
-
-#     def next(self, z, a, task, return_individual=False):
-#         """
-#         Predicts the next latent state given the current latent state and action.
-#         Args:
-#             - z: [*, hidden_dim] * might be 1 or 2 dims
-#             - a: [*, action_dim] 
-#         """
-#         node_features = self._generate_node_features(z, a)
-#         x = self._dynamics(node_features) # [*, num_agents, hidden_dim_node]
-#         x = torch.reshape(x, (*x.shape[:-2], -1)) # [*, hidden_dim_node * num_agents]
-#         return x
-
-#     def reward(self, z, a, task, return_individual=False):
-#         """
-#         Predicts instantaneous (single-step) reward.
-#         """
-#         node_features = self._generate_node_features(z, a)
-#         reward_nodes = self._reward(node_features)  # [*, num_agents, num_bins], [*, num_edges, num_bins]
-
-#         if return_individual:
-#             return reward_nodes
-#         else:
-#             total_reward = torch.mean(reward_nodes, dim=-2)
-#             return total_reward
-
-#     def Q(self, z, a, task, return_type='min', target=False, detach=False, return_individual=False):
-#         """
-#         Predict state-action value.
-#         `return_type` can be one of [`min`, `avg`, `all`]:
-#             - `min`: return the minimum of two randomly subsampled Q-values.
-#             - `avg`: return the average of two randomly subsampled Q-values.
-#             - `all`: return all Q-values.
-#         `target` specifies whether to use the target Q-networks or not.
-#         """
-#         assert return_type in {'min', 'avg', 'all'}
-#         qnet = self._Qs
-
-#         # M: generate qvalues
-#         node_features = self._generate_node_features(z, a)
-#         value_nodes = qnet(node_features)  # [num_q, *, num_agents, num_bins], [num_q, *, num_edges, num_bins]
-        
-#         # VDN style 
-#         if return_individual:
-#             out = value_nodes
-#         else:
-#             out = torch.mean(value_nodes, dim=-2)
-
-#         if return_type == 'all':
-#             return out
-
-#         qidx = torch.randperm(self.cfg.num_q, device=out.device)[:2]
-#         # Q = math.two_hot_inv(out[qidx], self.cfg)
-#         Q = out[qidx] # M: factor models only support num_bins=0
-#         if return_type == "min":
-#             return Q.min(0).values
-#         return Q.sum(0) / 2
-
-#     def __repr__(self):
-#         repr = 'FacWorldModel\n'
-#         modules = ['Encoder', 'Dynamics', 'Reward', 'Q-functions']
-#         for i, m in enumerate([self._encoder, self._dynamics, self._reward, self._Qs]):
-#             repr += f"{modules[i]}: {m}\n"
-#         repr += "Learnable parameters: {:,}".format(self.total_params)
-#         return repr
 

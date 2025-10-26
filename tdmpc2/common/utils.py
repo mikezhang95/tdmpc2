@@ -83,3 +83,97 @@ def sample_negatives(x, y, k):
     out_x = torch.cat([positives_x, negatives_x], dim=1)
     out_y = torch.cat([positives_y, negatives_y], dim=1)
     return out_x, out_y
+
+import control 
+def dlqr_with_linear_terms(A, B, Q, R, q=None, r=None, tol=1e-12):
+    """
+    Solve discrete-time infinite-horizon LQR with linear terms:
+      J = sum_t x'Qx + u'Ru + 2 q'x + 2 r' u
+
+    Returns:
+      K: [n_u, n_x]   (state feedback)
+      k0: [n_u,]      (constant offset, so u = -K x - k0)
+      S: Riccati solution
+      E: eigenvalues (closed-loop)
+    """
+    n_x = A.shape[0]
+    n_u = B.shape[1]
+
+    if q is None:
+        q = np.zeros((n_x,))
+    if r is None:
+        r = np.zeros((n_u,))
+
+    # 1) solve standard dlqr for S and K
+    K, S, E = control.dlqr(A, B, Q, R)  # K has shape (n_u, n_x)
+    # control.dlqr returns K as numpy array shape (n_u, n_x)
+
+    # Ensure shapes
+    q = q.reshape(-1)
+    r = r.reshape(-1)
+
+    # 2) compute M = R + B^T S B, should be positive definite
+    M = R + B.T.dot(S).dot(B)
+
+    # 3) solve for s: (I - (A - B K)^T) s = q + K^T r
+    Acl = A - B.dot(K)  # closed-loop A
+    I = np.eye(n_x)
+    lhs = I - Acl.T
+    rhs = q + K.T.dot(r)
+
+    # Check invertibility / solve robustly
+    # Use np.linalg.solve (or lstsq if singular)
+    try:
+        s = np.linalg.solve(lhs, rhs)
+    except np.linalg.LinAlgError:
+        # fallback to least-squares
+        s, *_ = np.linalg.lstsq(lhs, rhs, rcond=None)
+
+    # 4) compute k0 by solving M k0 = B^T s + r
+    rhs_k = B.T.dot(s) + r
+    k0 = np.linalg.solve(M, rhs_k)
+
+    return K, k0, S, E
+
+
+# from mpc import mpc
+# from mpc.mpc import QuadCost, LinDx
+#     def act(self, z, refresh=False):
+
+#         bs, n_state = z.shape
+#         n_ctrl = self.action_dim
+#         horizon = 10  # MPC horizon
+
+#         A, B, Q, R = self.get_lqr_matrics(discount=1.0)
+
+#         # Step 2. Construct block matrices for RePE
+#         # Combine A, B into F = [A | B] (horizon, B, n_state, n_state + n_ctrl)
+#         F = torch.cat([A, B], dim=1).unsqueeze(0).unsqueeze(0).repeat(horizon, bs, 1, 1)  # (horizon, bs, n_state, n_state + n_ctrl)
+
+#         # Construct quadratic cost matrix C for (x,u)
+#         C_block = torch.zeros(horizon, bs, n_state + n_ctrl, n_state + n_ctrl, device=z.device)
+#         C_block[:, :, :n_state, :n_state] = Q.unsqueeze(0).unsqueeze(0).repeat(horizon, bs, 1, 1)
+#         C_block[:, :, n_state:, n_state:] = R.unsqueeze(0).unsqueeze(0).repeat(horizon, bs, 1, 1)
+#         c_block = torch.zeros((horizon, bs, n_state + n_ctrl), device=z.device)
+
+#         # Step 3. Control bounds
+#         u_lower = -torch.ones(horizon, bs, n_ctrl, device=z.device) * 1.0
+#         u_upper = torch.ones(horizon, bs, n_ctrl, device=z.device) * 1.0
+
+#         x_init = z  # current state as MPC initial condition
+#         x_pred, u_pred, _ = mpc.MPC(
+#             n_state=n_state,
+#             n_ctrl=n_ctrl,
+#             T=horizon,
+#             u_lower=u_lower,
+#             u_upper=u_upper,
+#             lqr_iter=10,
+#             backprop=False,
+#             verbose=0,
+#             exit_unconverged=False,
+#         )(x_init, QuadCost(C_block, c_block), LinDx(F))
+#         u_pred = u_pred[0] # Take the first action only
+
+#         if self.cfg.dynamic_structure == 'companion_fixed':
+#             u_pred = self._action_encoder.inverse(z, u_pred)
+#         return u_pred.clamp(-1.0, 1.0)

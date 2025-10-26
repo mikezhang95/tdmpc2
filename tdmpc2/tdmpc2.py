@@ -394,7 +394,12 @@ z (torch.Tensor): Latent state from which to plan.
             elif hasattr(self.cfg, 'loss_type') and self.cfg.loss_type == 'pairwise':
                 reward_loss = reward_loss + math.pairwise_logistic_loss(rew_pred_unbind, rew_unbind).mean() * self.cfg.rho**t
             else:
-                reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
+                if rew_pred_unbind.shape[-1] == 2:
+                    pre1, pre2 = rew_pred_unbind[...,0:1], rew_pred_unbind[...,1:2]
+                    reward_loss = reward_loss + 0.5*math.soft_ce(pre1, rew_unbind, self.cfg).mean() * self.cfg.rho**t
+                    reward_loss = reward_loss + 0.5*math.soft_ce(pre2, rew_unbind, self.cfg).mean() * self.cfg.rho**t
+                else:
+                    reward_loss = reward_loss + math.soft_ce(rew_pred_unbind, rew_unbind, self.cfg).mean() * self.cfg.rho**t
             for _, qs_unbind_unbind in enumerate(qs_unbind.unbind(0)):
                 value_loss = value_loss + math.soft_ce(qs_unbind_unbind, td_targets_unbind, self.cfg).mean() * self.cfg.rho**t
 
