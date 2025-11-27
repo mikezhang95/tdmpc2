@@ -81,14 +81,16 @@ class WorldModel(nn.Module):
         Overriding `train` method to keep target Q-networks in eval mode.
         """
         super().train(mode)
-        self._target_Qs.train(False)
+        if not self.is_student:
+            self._target_Qs.train(False)
         return self
 
     def soft_update_target_Q(self):
         """
         Soft-update target Q-networks using Polyak averaging.
         """
-        self._target_Qs_params.lerp_(self._detach_Qs_params, self.cfg.tau)
+        if not self.is_student:
+            self._target_Qs_params.lerp_(self._detach_Qs_params, self.cfg.tau)
 
     def task_emb(self, x, task):
         """
@@ -271,6 +273,7 @@ class FacTOLD(WorldModel):
 
         # factored modules
         mlp_dim_agent = max(cfg.mlp_dim // self.num_agents, 50)
+        mlp_dim_agent = cfg.mlp_dim // self.num_agents
         self._dynamics = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent+cfg.task_dim, 2*[mlp_dim_agent], self.latent_dim_agent) 
         self._reward = tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent+cfg.task_dim, 2*[mlp_dim_agent], 1)
         self._Qs = layers.Ensemble([tdmpc_utils.FacMLP(self.num_agents, self.latent_dim_agent+self.action_dim_agent+cfg.task_dim, 2*[cfg.mlp_dim//self.num_agents], 1, is_q=True) for _ in range(cfg.num_q)])
